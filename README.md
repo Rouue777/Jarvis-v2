@@ -47,6 +47,15 @@ está em `config/api_keys.example.json`.
 Guia ilustrado passo a passo: [docs/instalacao.html](docs/instalacao.html)
 (abra o arquivo no navegador).
 
+## Recado na primeira abertura
+
+Na primeira vez que o JARVIS abre em um PC, logo depois da saudação, ele dá um
+recado do criador deste fork e abre o Instagram
+[@joao.tracker](https://www.instagram.com/joao.tracker/) no navegador. Isso
+acontece **uma única vez** por instalação. Para desligar antes mesmo da primeira
+abertura, coloque `"welcome_promo_shown": true` em `config/api_keys.json`. O
+texto e o perfil ficam em `core/welcome_promo.py`.
+
 ## Segurança das suas chaves
 
 - `config/api_keys.json`, `config/certs/` e `memory/*.json` estão no

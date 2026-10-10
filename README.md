@@ -34,7 +34,7 @@ um ícone na área de trabalho que abre o JARVIS sem janela de terminal.
 ## Instalação rápida (Windows)
 
 ```bash
-git clone https://github.com/SEU-USUARIO/jarvis-opensource.git
+git clone https://github.com/jgm-source/jarvis-opensource.git
 cd jarvis-opensource
 py setup.py
 py main.py

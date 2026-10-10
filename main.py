@@ -2762,6 +2762,12 @@ class JarvisLive:
                     shown on the UI content panel. Waits for turn_complete event
                     instead of a fixed sleep so there is no unnecessary gap.
         """
+        # A intro de abertura (core/intro.py) toca antes da saudação: espera
+        # ela terminar, com teto para nunca segurar o briefing para sempre.
+        _deadline = time.monotonic() + 30.0
+        while self.ui.intro_active() and time.monotonic() < _deadline:
+            await asyncio.sleep(0.2)
+
         memory   = load_memory()
         identity = memory.get("identity", {})
 

@@ -47,6 +47,17 @@ está em `config/api_keys.example.json`.
 Guia ilustrado passo a passo: [docs/instalacao.html](docs/instalacao.html)
 (abra o arquivo no navegador).
 
+## Intro de abertura
+
+Na primeira abertura em cada PC, antes da saudação, as linhas da malha do
+JARVIS constroem um cartão, um checkout, a palavra RASTRACKING e o Pixel da
+Meta, que absorve os dados e solta dinheiro; no fim as linhas giram e se
+encaixam no rosto do JARVIS, que então faz a saudação (`core/intro.py`).
+Dura cerca de 18 segundos e toca **uma única vez** (marca `intro_shown` em
+`config/api_keys.json`). Para tocar em toda abertura, use
+`"intro_always": true`; para nunca tocar, `"intro_shown": true`. Um
+protótipo em HTML da mesma animação está em `docs/intro-preview.html`.
+
 ## Recado na primeira abertura
 
 Na primeira vez que o JARVIS abre em um PC, logo depois da saudação, ele dá um

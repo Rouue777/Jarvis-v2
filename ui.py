@@ -61,6 +61,12 @@ try:
 except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
 
+try:
+    from core.intro import IntroAnimation as _IntroAnimation
+except Exception as _e:          # noqa: BLE001 — a intro é cosmética
+    _IntroAnimation = None
+    print(f"[Intro] unavailable ({_e}).")
+
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -464,9 +470,31 @@ class HudCanvas(QWidget):
         self._base_scale = 1.0    # slow "breathing" target; amp is added per-frame
         self._base_halo  = 55.0
 
+        self._intro = None        # IntroAnimation em curso (core/intro.py) ou None
+
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
+
+    # ── intro de abertura (core/intro.py) ─────────────────────────────────
+    def start_intro(self) -> None:
+        """Toca a intro (malha → cartão → checkout → Rastracking → pixel →
+        rosto) se ela ainda estiver pendente neste PC."""
+        if _IntroAnimation is None or self.hud_style != "face":
+            return
+        try:
+            from core.intro import is_pending
+            if not is_pending():
+                return
+            self._intro = _IntroAnimation()
+            self._intro.start(delay=0.6)
+        except Exception as e:
+            print(f"[Intro] could not start: {e}")
+            self._intro = None
+
+    def intro_active(self) -> bool:
+        i = getattr(self, "_intro", None)
+        return bool(i is not None and i.active)
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
@@ -655,7 +683,8 @@ class HudCanvas(QWidget):
         # either way because the animation state keeps stepping at 60 Hz.
         self._paint_tick = (self._paint_tick + 1) % 6
         active = (self.speaking or amp > 0.02
-                  or self.state in ("THINKING", "PROCESSING"))
+                  or self.state in ("THINKING", "PROCESSING")
+                  or self.intro_active())
         if _blinked or (self._paint_tick % 2 == 0 if active
                         else self._paint_tick % 3 == 0):
             # Nothing is on screen when the window is hidden or minimised, so
@@ -881,6 +910,27 @@ class HudCanvas(QWidget):
                     _acc = qcol(C.GREEN)
                 else:
                     _acc = qcol(C.PRI)
+            _intro = self._intro
+            if _intro is not None and _intro.active:
+                # A intro desenha no lugar do rosto e, no fim, faz crossfade
+                # para o avatar real. Qualquer erro só pula a intro.
+                try:
+                    _fk = _intro.paint(p, W, H, self._avatar, cx, _head_cy, _r_head,
+                                       qcol(C.PRI), qcol(C.GREEN))
+                except Exception as e:          # noqa: BLE001
+                    print(f"[Intro] paint failed, skipping: {e}")
+                    _intro.skip()
+                    _fk = 1.0
+                if _fk <= 0.0:
+                    p.end()
+                    return
+                if _fk < 1.0:
+                    p.setOpacity(_fk)
+                    self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
+                    p.setOpacity(1.0)
+                    p.end()
+                    return
+                self._intro = None
             self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
 
         # reactor core — the other centrepiece, and the fallback if the head
@@ -3365,6 +3415,10 @@ class MainWindow(QMainWindow):
         self._ready = self._check_config()
         if not self._ready:
             self._show_setup()
+        else:
+            # Config já pronta: a intro de abertura toca assim que a janela
+            # aparece (no primeiro uso ela toca ao terminar o setup).
+            QTimer.singleShot(400, self.hud.start_intro)
 
         sc_mute = QShortcut(QKeySequence("F4"), self)
         sc_mute.activated.connect(self._toggle_mute)
@@ -6251,6 +6305,7 @@ class MainWindow(QMainWindow):
             self._overlay.hide()
             self._overlay = None
         self._apply_state("LISTENING")
+        self.hud.start_intro()
         self._assistant_name = _read_full_config().get("assistant_name", "JARVIS") or "JARVIS"
         self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
 
@@ -6461,6 +6516,13 @@ class JarvisUI:
     def wait_for_api_key(self):
         while not self._win._ready:
             time.sleep(0.1)
+
+    def intro_active(self) -> bool:
+        """True enquanto a intro de abertura estiver tocando no HUD."""
+        try:
+            return self._win.hud.intro_active()
+        except Exception:
+            return False
 
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""

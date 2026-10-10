@@ -2775,7 +2775,10 @@ class JarvisLive:
             e = identity.get(k, {})
             return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
 
-        lang = _val("language")
+        # Sem idioma na memória (primeira abertura), o padrão deste fork é o
+        # português do Brasil; a partir da primeira fala do usuário, vale a
+        # língua dele (ver [LANGUAGE] em core/prompt.txt).
+        lang = _val("language") or "Brazilian Portuguese (pt-BR)"
         name = _val("name")
         time_str = datetime.now().strftime("%H:%M")
         lang_clause0 = (f" Speak in {lang}, then follow the user's own language "

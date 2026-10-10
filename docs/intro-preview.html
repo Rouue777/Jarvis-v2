@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intro JARVIS</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #040b10; overflow: hidden; font-family: "Courier New", ui-monospace, monospace; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 14px; display: flex; justify-content: center; gap: 10px; pointer-events: none; }
+  #bar button { pointer-events: auto; background: rgba(28,198,216,.08); color: #1cc6d8; border: 1px solid rgba(28,198,216,.5); border-radius: 999px; padding: 6px 16px; font: 13px "Courier New", monospace; letter-spacing: .12em; cursor: pointer; }
+  #bar button:hover { background: rgba(28,198,216,.18); }
+  #phase { position: fixed; top: 14px; left: 16px; color: rgba(28,198,216,.55); font-size: 12px; letter-spacing: .2em; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="phase"></div>
+<div id="bar"><button id="replay">▶ REPETIR</button></div>
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const phaseEl = document.getElementById('phase');
+let W, H, DPR;
+function resize(){ DPR = Math.min(2, devicePixelRatio||1); W = innerWidth; H = innerHeight; cv.width = W*DPR; cv.height = H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0); }
+addEventListener('resize', resize); resize();
+
+const TEAL = '#1cc6d8', GREEN = '#14e07a', GOLD = '#f3c969';
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const ease = t => t<.5 ? 2*t*t : -1+(4-2*t)*t;
+const lerp = (a,b,t)=>a+(b-a)*t;
+const rnd = (a,b)=>a+Math.random()*(b-a);
+const seg = (t,a,b)=>clamp((t-a)/(b-a),0,1);
+const L = () => { const s = Math.min(W,H)/900; return { s, cx: W/2, cy: H/2, farLeft: -700*s, right: W + 500*s }; };
+
+// ─────────────────────────────────────────────────────────────────────────
+// A MALHA: um unico conjunto de segmentos de linha. Cada "forma" (cartao,
+// checkout, RASTRACKING, pixel, rosto) e uma lista de segmentos do mesmo
+// tamanho; a animacao interpola de uma lista para a outra. Assim as mesmas
+// linhas que formam o JARVIS constroem cada elemento.
+// ─────────────────────────────────────────────────────────────────────────
+const HALF = 420;                 // segmentos por metade (A e B)
+const jit = (p, j) => ({ x: p.x + rnd(-j, j), y: p.y + rnd(-j, j) });
+
+// quebra um caminho em segmentos curtos com jitter (visual de malha)
+function pathSegs(pts, closed, step, j){ const out=[]; const n=pts.length; const m=closed?n:n-1;
+  for (let i=0;i<m;i++){ const a=pts[i], b=pts[(i+1)%n]; const len=Math.hypot(b.x-a.x,b.y-a.y); const k=Math.max(1,Math.round(len/step));
+    for (let q=0;q<k;q++){ const t0=q/k, t1=(q+1)/k; if (Math.random()<0.12) continue;   // falhas = fragmentos
+      out.push({a:jit({x:lerp(a.x,b.x,t0),y:lerp(a.y,b.y,t0)},j), b:jit({x:lerp(a.x,b.x,t1),y:lerp(a.y,b.y,t1)},j)}); } }
+  return out; }
+function rrectPts(x,y,w,h,r){ const p=[]; const c=[[x+w/2-r,y-h/2+r,-Math.PI/2,0],[x+w/2-r,y+h/2-r,0,Math.PI/2],[x-w/2+r,y+h/2-r,Math.PI/2,Math.PI],[x-w/2+r,y-h/2+r,Math.PI,Math.PI*1.5]];
+  c.forEach(([cx,cy,a0,a1])=>{ for(let i=0;i<=6;i++){ const a=lerp(a0,a1,i/6); p.push({x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)}); } }); return p; }
+// triangulos soltos dentro de uma elipse (o "ruido" da malha)
+function fragments(cx,cy,rx,ry,n,size){ const out=[]; for(let i=0;i<n;i++){ const a=rnd(0,Math.PI*2), r=Math.sqrt(Math.random()); const px=cx+Math.cos(a)*r*rx, py=cy+Math.sin(a)*r*ry;
+  const p=[0,1,2].map(k=>({x:px+rnd(-size,size),y:py+rnd(-size,size)})); const e=[[0,1],[1,2],[2,0]]; e.forEach(([i,j])=>{ if(Math.random()<0.7) out.push({a:p[i],b:p[j]}); }); } return out; }
+function fit(segs, n, cx, cy, rx, ry){ segs=segs.slice(); while (segs.length<n) segs.push(...fragments(cx,cy,rx,ry,4,10*L().s)); shuffle(segs); return segs.slice(0,n); }
+function shuffle(a){ for (let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+function move(segs, dx, dy){ return segs.map(s=>({a:{x:s.a.x+dx,y:s.a.y+dy},b:{x:s.b.x+dx,y:s.b.y+dy}})); }
+function scaleAbout(segs, cx, cy, k){ return segs.map(s=>({a:{x:cx+(s.a.x-cx)*k,y:cy+(s.a.y-cy)*k},b:{x:cx+(s.b.x-cx)*k,y:cy+(s.b.y-cy)*k}})); }
+
+// ── Formas ────────────────────────────────────────────────────────────────
+function shapeScatter(n, x0, x1){ const out=[]; for(let i=0;i<n;i++){ const p={x:rnd(x0,x1),y:rnd(-50,H+50)}; out.push({a:p,b:{x:p.x+rnd(-14,14),y:p.y+rnd(-14,14)}}); } return out; }
+function shapeCard(cx,cy){ const s=L().s, w=300*s, h=185*s; let o=[];
+  o.push(...pathSegs(rrectPts(cx,cy,w,h,14),true,14*s,1.5));
+  o.push(...pathSegs(rrectPts(cx-w/2+55*s,cy-h/2+70*s,50*s,38*s,4),true,10*s,1));
+  for (let i=0;i<4;i++){ const x=cx-w/2+30*s+i*((w-60*s)/4); o.push(...pathSegs([{x,y:cy+h/2-60*s},{x:x+(w-60*s)/4-14*s,y:cy+h/2-60*s}],false,12*s,1)); }
+  o.push(...pathSegs([{x:cx-w/2+30*s,y:cy+h/2-28*s},{x:cx-w/2+30*s+w*0.5,y:cy+h/2-28*s}],false,12*s,1));
+  o.push(...fragments(cx,cy,w*0.45,h*0.4,14,9*s));
+  return fit(o,HALF,cx,cy,w*0.75,h*0.75); }
+function shapeCheckout(cx,cy){ const s=L().s, w=300*s, h=230*s; let o=[];
+  o.push(...pathSegs(rrectPts(cx,cy,w,h,10),true,14*s,1.5));
+  o.push(...pathSegs([{x:cx-w/2,y:cy-h/2+36*s},{x:cx+w/2,y:cy-h/2+36*s}],false,12*s,1));
+  o.push(...pathSegs(rrectPts(cx,cy,w-48*s,60*s,4),true,10*s,1));
+  o.push(...fragments(cx,cy,w*0.45,h*0.42,16,9*s));
+  return fit(o,HALF,cx,cy,w*0.5,h*0.5); }
+function shapeText(txt, cx, cy, px){ // bordas do texto viram segmentos
+  const oc=document.createElement('canvas'); const pad=20; oc.width=Math.ceil(px*txt.length*0.95)+pad*2; oc.height=Math.ceil(px*1.4)+pad*2; const g=oc.getContext('2d');
+  g.font='900 '+px+'px "Arial Black", Impact, sans-serif'; g.textAlign='center'; g.textBaseline='middle'; g.fillStyle='#fff'; g.fillText(txt, oc.width/2, oc.height/2);
+  const d=g.getImageData(0,0,oc.width,oc.height).data, w=oc.width, h=oc.height; const edge=[];
+  const on=(x,y)=>x>=0&&y>=0&&x<w&&y<h&&d[(y*w+x)*4+3]>128;
+  for (let y=1;y<h-1;y+=2) for (let x=1;x<w-1;x+=2) if (on(x,y) && (!on(x-2,y)||!on(x+2,y)||!on(x,y-2)||!on(x,y+2))) edge.push({x,y});
+  const out=[]; const ox=cx-w/2, oy=cy-h/2;
+  for (let i=0;i<HALF*0.8 && edge.length;i++){ const p=edge[Math.floor(Math.random()*edge.length)]; let q=null;
+    for (let k=0;k<12;k++){ const c=edge[Math.floor(Math.random()*edge.length)]; const dd=Math.hypot(c.x-p.x,c.y-p.y); if (dd>5&&dd<18){ q=c; break; } }
+    if (!q) q={x:p.x+rnd(-9,9),y:p.y+rnd(-9,9)};
+    out.push({a:{x:ox+p.x,y:oy+p.y},b:{x:ox+q.x,y:oy+q.y}}); }
+  out.push(...fragments(cx,cy,w*0.55,h*0.9,20,8));
+  return fit(out,HALF,cx,cy,w*0.5,h*0.6); }
+function shapePixel(cx,cy,k){ const s=L().s, R=40*s*k; let o=[]; const inf=[];
+  for (let i=0;i<120;i++){ const t=i/120*Math.PI*2; const q=1+Math.sin(t)**2; inf.push({x:cx+R*1.6*Math.cos(t)/q,y:cy+R*1.6*Math.sin(t)*Math.cos(t)/q}); }
+  o.push(...pathSegs(inf,true,8*s,1.2)); o.push(...pathSegs(inf,true,8*s,1.2).map(sg=>({a:{x:sg.a.x+2,y:sg.a.y+2},b:{x:sg.b.x+2,y:sg.b.y+2}})));
+  const circ=(r)=>{ const p=[]; for(let i=0;i<72;i++){ const a=i/72*Math.PI*2; p.push({x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)}); } return p; };
+  o.push(...pathSegs(circ(R*2.2),true,10*s,1.5)); o.push(...pathSegs(circ(R*2.6),true,14*s,2).filter(()=>Math.random()<0.5));
+  o.push(...fragments(cx,cy,R*2.4,R*2.4,50,8*s));
+  return fit(o,HALF,cx,cy,R*2.6,R*2.6); }
+function shapeFace(cx,cy){ const s=L().s; const fy=cy-20*s, rx=165*s, ry=240*s; const pts=[];
+  for (let i=0;i<300;i++){ const a=rnd(0,Math.PI*2), r=Math.sqrt(Math.random()); let x=Math.cos(a)*r*rx, y=Math.sin(a)*r*ry; if (y>0) x*=1-0.35*(y/ry); pts.push({x:cx+x,y:fy+y}); }
+  const o=[]; for (let i=0;i<pts.length;i++){ const d=pts.map((p,j)=>({j,d:(p.x-pts[i].x)**2+(p.y-pts[i].y)**2})).filter(q=>q.j!==i).sort((a,b)=>a.d-b.d).slice(0,3); d.forEach(q=>{ if(q.j>i&&Math.random()<0.8) o.push({a:pts[i],b:pts[q.j]}); }); }
+  // tracos do rosto (mais densos)
+  const curve=(p0,p1,p2,n)=>{ const p=[]; for(let i=0;i<=n;i++){ const t=i/n; p.push({x:(1-t)**2*p0.x+2*(1-t)*t*p1.x+t*t*p2.x, y:(1-t)**2*p0.y+2*(1-t)*t*p1.y+t*t*p2.y}); } return p; };
+  o.push(...pathSegs(curve({x:cx-95*s,y:fy-72*s},{x:cx-60*s,y:fy-85*s},{x:cx-25*s,y:fy-70*s},8),false,8*s,0.5));
+  o.push(...pathSegs(curve({x:cx+95*s,y:fy-72*s},{x:cx+60*s,y:fy-85*s},{x:cx+25*s,y:fy-70*s},8),false,8*s,0.5));
+  [[-62],[62]].forEach(([dx])=>{ const p=[]; for(let i=0;i<24;i++){ const a=i/24*Math.PI*2; p.push({x:cx+dx*s+28*s*Math.cos(a),y:fy-40*s+10*s*Math.sin(a)}); } o.push(...pathSegs(p,true,6*s,0.4)); });
+  o.push(...pathSegs([{x:cx-6*s,y:fy-30*s},{x:cx-18*s,y:fy+30*s},{x:cx+14*s,y:fy+34*s},{x:cx+6*s,y:fy-28*s}],false,8*s,0.6));
+  o.push(...pathSegs(curve({x:cx-45*s,y:fy+95*s},{x:cx,y:fy+80*s},{x:cx+45*s,y:fy+95*s},10),false,7*s,0.4));
+  o.push(...pathSegs(curve({x:cx-45*s,y:fy+95*s},{x:cx,y:fy+112*s},{x:cx+45*s,y:fy+95*s},10),false,7*s,0.4));
+  o.push(...fragments(cx,fy+180*s,120*s,60*s,30,12*s)); // pescoco
+  return fit(o,HALF*2,cx,fy,rx*0.9,ry*0.9); }
+
+// ── Linha do tempo e keyframes ────────────────────────────────────────────
+const T = { card: 1.0, chk: 2.4, fly: 3.2, data: 4.4, gone: 5.8, ok: 5.9, chkOut: 6.8, rastr: 6.8, pulse: 8.2,
+            rastrOut: 9.4, pixel: 9.4, absorb: 11.0, money: 12.4, spin: 14.6, face: 17.0, hud: 18.2, end: 22.5 };
+let KA=[], KB=[], faceSegs=[];
+function build(){ const {s,cx,cy,farLeft,right}=L(); faceSegs=shapeFace(cx,cy); const fA=faceSegs.slice(0,HALF), fB=faceSegs.slice(HALF,HALF*2);
+  const cardL=shapeCard(cx-520*s,cy), cardC=move(cardL,520*s,-150*s);
+  const rastr=shapeText('RASTRACKING',cx,cy,64*s), rastrBig=scaleAbout(rastr,cx,cy,1.12);
+  const chk=shapeCheckout(cx,cy); const pix=shapePixel(cx,cy,1), pixBig=shapePixel(cx,cy,1.9);
+  // metade A: particulas → cartao (esq) → cartao (centro) → RASTRACKING → sai pela esquerda → rosto
+  KA=[ [0, shapeScatter(HALF,-100,W*0.45)], [T.card+1.4, cardL], [T.fly, cardL], [T.data, cardC], [T.gone-0.2, cardC],
+       [T.rastr+1.0, rastr], [T.pulse, rastr], [T.pulse+0.8, rastrBig], [T.rastrOut, rastrBig], [T.rastrOut+1.2, move(rastrBig,farLeft-cx,0)],
+       [T.spin, move(rastrBig,farLeft-cx,0)], [T.face, fA] ];
+  // metade B: particulas → checkout (centro) → checkout sai pela esquerda → pixel (dir) → pixel (centro) → pixel grande → rosto
+  KB=[ [0, shapeScatter(HALF,W*0.55,W+100)], [T.chk+0.9, chk], [T.chkOut, chk], [T.chkOut+1.2, move(chk,farLeft-cx,0)],
+       [T.chkOut+1.21, move(pix,right-cx,0)], [T.pixel, move(pix,right-cx,0)], [T.pixel+1.2, pix], [T.absorb, pix], [T.money, pixBig],
+       [T.spin, pixBig], [T.face, fB] ]; }
+function sample(K, t, spinFrom){ let i=0; while (i<K.length-1 && K[i+1][0]<=t) i++; if (i>=K.length-1) return K[K.length-1][1];
+  const [t0,A]=K[i], [t1,B]=K[i+1]; const e=ease(seg(t,t0,t1)); const {cx,cy}=L();
+  const spin = (t0>=spinFrom) ? Math.sin(e*Math.PI)*Math.PI*0.9 : 0; const c=Math.cos(spin), sn=Math.sin(spin);
+  const rot=p=>spin? {x:cx+(p.x-cx)*c-(p.y-cy)*sn, y:cy+(p.x-cx)*sn+(p.y-cy)*c} : p;
+  return A.map((s,k)=>({ a:rot({x:lerp(s.a.x,B[k].a.x,e),y:lerp(s.a.y,B[k].a.y,e)}), b:rot({x:lerp(s.b.x,B[k].b.x,e),y:lerp(s.b.y,B[k].b.y,e)}) })); }
+
+// ── Desenho ───────────────────────────────────────────────────────────────
+function glow(c,b){ ctx.shadowColor=c; ctx.shadowBlur=b; } function noglow(){ ctx.shadowBlur=0; }
+function label(txt,x,y,a=1,size=13,color=TEAL){ ctx.save(); ctx.globalAlpha=a; ctx.fillStyle=color; ctx.font=size+'px "Courier New", monospace'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.letterSpacing='0.2em'; ctx.fillText(txt,x,y); ctx.restore(); }
+function drawMesh(segs, alpha, glowAmt){ ctx.save(); ctx.globalAlpha=alpha; ctx.strokeStyle=TEAL; ctx.lineWidth=0.8; glow(TEAL,glowAmt); ctx.beginPath(); segs.forEach(s=>{ ctx.moveTo(s.a.x,s.a.y); ctx.lineTo(s.b.x,s.b.y); }); ctx.stroke(); noglow();
+  ctx.fillStyle='rgba(28,198,216,.9)'; for (let i=0;i<segs.length;i+=5){ ctx.beginPath(); ctx.arc(segs[i].a.x,segs[i].a.y,1,0,Math.PI*2); ctx.fill(); } ctx.restore(); }
+function packet(from,to,t,txt,arc){ const x=lerp(from.x,to.x,t), y=lerp(from.y,to.y,t)-Math.sin(t*Math.PI)*arc; ctx.save(); ctx.fillStyle=GREEN; glow(GREEN,16); ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); noglow(); ctx.restore(); if (txt) label(txt,x,y-14,0.85,10,GREEN); }
+function rings(x,y,a,r0,r1,speed,n,inward){ ctx.save(); ctx.strokeStyle=TEAL; ctx.lineWidth=1.2; for (let i=0;i<n;i++){ let ph=((performance.now()/speed)+i/n)%1; if (inward) ph=1-ph; ctx.globalAlpha=a*(inward?ph:1-ph)*0.7; ctx.beginPath(); ctx.arc(x,y,lerp(r0,r1,ph),0,Math.PI*2); ctx.stroke(); } ctx.restore(); }
+function drawHUD(a){ const {cx,s}=L(); const y=H-70; label('●  LISTENING',cx,y-28,a,13,GREEN); ctx.save(); ctx.globalAlpha=a; ctx.fillStyle='rgba(28,198,216,.5)';
+  for(let i=0;i<60;i++){ const h=2+Math.abs(Math.sin(i*0.7+performance.now()/300))*6*(i%7?1:2); ctx.fillRect(cx-150+i*5,y-h/2,3,h); }
+  ctx.strokeStyle='#ff3b6b'; ctx.lineWidth=1.5; glow('#ff3b6b',10); ctx.beginPath(); ctx.arc(cx-260*s,y,26,0,Math.PI*2); ctx.stroke(); ctx.strokeStyle=GREEN; glow(GREEN,10); ctx.beginPath(); ctx.arc(cx+260*s,y,26,0,Math.PI*2); ctx.stroke(); noglow();
+  ctx.font='20px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle='#fff'; ctx.fillText('✋',cx-260*s,y+1); ctx.fillText('🎙',cx+260*s,y+1); ctx.restore(); }
+
+let coins=[], lastCoin=0, burstDone=false, t0=0, lastNow=0;
+function burst(x,y,n){ for(let i=0;i<n;i++){ const a=rnd(0,Math.PI*2), v=rnd(2,7); coins.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-2,life:1,size:rnd(16,30)}); } }
+function start(){ t0=performance.now(); build(); coins=[]; burstDone=false; }
+
+function frame(now){
+  const t=(now-t0)/1000; const {s,cx,cy,farLeft}=L();
+  ctx.fillStyle='#040b10'; ctx.fillRect(0,0,W,H);
+  const g=ctx.createRadialGradient(cx,cy,0,cx,cy,Math.max(W,H)*0.7); g.addColorStop(0,'rgba(10,60,70,.35)'); g.addColorStop(1,'rgba(0,0,0,0)'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  let phase='';
+  const A=sample(KA,t,T.spin), B=sample(KB,t,T.spin);
+  const rPower=seg(t,T.pulse,T.pulse+0.8)*(1-seg(t,T.rastrOut,T.rastrOut+0.6));
+  const pPower=seg(t,T.absorb,T.money);
+  const faceK=seg(t,T.spin,T.face);
+  const glowA = t<T.spin ? 3+rPower*24 : 3; const glowB = t<T.spin ? 3+pPower*28 : 3;
+  // a metade A some enquanto o cartao "entrega" os dados e renasce como RASTRACKING
+  const fadeA = (t>=T.gone-0.2 && t<T.rastr+0.3) ? 1-seg(t,T.gone-0.2,T.gone+0.3) + seg(t,T.rastr-0.2,T.rastr+0.3)*0.0 : 1;
+  drawMesh(A, Math.max(0.15,fadeA), glowA); drawMesh(B, 1, glowB);
+
+  if (t<T.spin){
+    if (t<T.card+1.4) phase=t<T.card?'LINHAS DA MALHA':'A MALHA FORMA O CARTAO';
+    else if (t<T.fly) phase='CARTAO PRONTO · CHECKOUT SE MONTA';
+    else if (t<T.data) phase='CARTAO VOA AO CHECKOUT';
+    else if (t<T.gone) phase='DADOS DO CARTAO → CHECKOUT';
+    else if (t<T.chkOut) phase='PAGAMENTO APROVADO';
+    else if (t<T.pulse) phase='CHECKOUT SAI · DADOS → RASTRACKING';
+    else if (t<T.rastrOut) phase='RASTRACKING CARREGADO';
+    else if (t<T.absorb) phase='DADOS x3 → PIXEL DA META';
+    else if (t<T.money) phase='PIXEL ABSORVE · FICA MAIS FORTE';
+    else phase='RESULTADO';
+
+    // textos de apoio (seguem os elementos)
+    const chkDraw=seg(t,T.chk,T.chk+0.9), chkSlide=ease(seg(t,T.chkOut,T.chkOut+1.2)), chkX=lerp(cx,farLeft,chkSlide), chkA=chkDraw*(1-chkSlide);
+    if (chkA>0.02){ label('CHECKOUT',chkX,cy-115*s+18*s,chkA,13); const ok=seg(t,T.ok,T.ok+0.6);
+      if (ok>0){ label('PAGAMENTO APROVADO',chkX,cy+115*s-28*s,chkA*ok,12,GREEN); ctx.save(); ctx.globalAlpha=chkA*(1-ok)*0.8; ctx.strokeStyle=GREEN; ctx.lineWidth=1; glow(GREEN,10); ctx.beginPath(); ctx.arc(chkX,cy,40+ok*240,0,Math.PI*2); ctx.stroke(); noglow(); ctx.restore(); }
+      else label('aguardando cartao...',chkX,cy+115*s-28*s,chkA*0.6,11); }
+    const fly=ease(seg(t,T.fly,T.data)); const cardPos={x:lerp(cx-520*s,cx,fly),y:lerp(cy,cy-150*s,fly)};
+    if (t>=T.data && t<T.gone+0.4) ['pedido','valor','utm','cliente'].forEach((txt,i)=>{ const tt=seg(t,T.data+i*0.25,T.data+i*0.25+0.9); if(tt>0&&tt<1) packet(cardPos,{x:cx,y:cy},tt,txt,20); });
+    const rIn=seg(t,T.rastr,T.rastr+1.0), rOut=ease(seg(t,T.rastrOut,T.rastrOut+1.2)), rX=lerp(cx,farLeft,rOut), rA=rIn*(1-rOut);
+    if (rA>0.02){ label('TRACKEAMENTO  ·  ATRIBUICAO  ·  ESCALA',rX,cy+62*s,rA*0.8,12); if (rPower>0) rings(rX,cy,rA*rPower,60*s,300*s,1200,3,false); }
+    if (t>=T.chkOut && t<T.pulse+0.6) ['pedido','valor','utm','cliente','device','origem'].forEach((txt,i)=>{ const tt=seg(t,T.chkOut+i*0.2,T.chkOut+i*0.2+1.0); if(tt>0&&tt<1) packet({x:chkX,y:cy},{x:cx,y:cy},tt,txt,60); });
+    const pIn=seg(t,T.pixel,T.pixel+1.2), pX=lerp(L().right,cx,ease(pIn));
+    if (pIn>0.9){ label('PIXEL DA META',cx,cy+(130+pPower*100)*s,1,12); if (pPower>0&&t<T.money) rings(cx,cy,1,320*s,90*s,700,4,true); }
+    if (t>=T.rastrOut && t<T.absorb+0.8){ const names=['pedido','valor','utm','cliente','device','origem'];
+      for (let i=0;i<18;i++){ const tt=seg(t,T.rastrOut+i*0.08,T.rastrOut+i*0.08+1.1); if(tt>0&&tt<1) packet({x:rX,y:cy+((i%3)-1)*60*s},{x:pX,y:cy},tt,i%3===0?names[Math.floor(i/3)%names.length]:'',(i%3-1)*80); } }
+    if (t>=T.money){ if(!burstDone){ burst(cx,cy,90); burstDone=true; } if (now-lastCoin>45 && t<T.money+1.6){ lastCoin=now; burst(cx+rnd(-30,30),cy+rnd(-20,20),3); } }
+  } else {
+    phase = faceK<1 ? 'AS LINHAS GIRAM E VIRAM O JARVIS' : 'JARVIS ONLINE';
+    if (faceK>=1){ const fy=cy-20*s; [[-62],[62]].forEach(([dx])=>{ ctx.save(); ctx.fillStyle=GREEN; glow(GREEN,18); ctx.beginPath(); ctx.arc(cx+dx*s,fy-40*s,6*s,0,Math.PI*2); ctx.fill(); noglow(); ctx.restore(); }); }
+    const hA=seg(t,T.hud,T.hud+0.8); if (hA>0){ drawHUD(hA); label('JARVIS ONLINE  ·  INICIANDO INTRODUCAO',cx,60,hA*0.9,13); }
+  }
+  const dt=Math.min(0.05,(now-(lastNow||now))/1000); lastNow=now; const f=dt*60;
+  if (t>=T.spin+0.4) coins=[];
+  coins.forEach(c=>{ c.x+=c.vx*f; c.y+=c.vy*f; c.vy+=0.08*f; c.vx*=Math.pow(0.99,f); c.life-=dt/1.6; }); coins=coins.filter(c=>c.life>0);
+  coins.forEach(c=>{ ctx.save(); ctx.globalAlpha=clamp(c.life,0,1); ctx.font=c.size+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; glow(GOLD,14); ctx.fillText('💰',c.x,c.y); noglow(); ctx.restore(); });
+  phaseEl.textContent=phase; if (t>T.end) start(); requestAnimationFrame(frame);
+}
+document.getElementById('replay').onclick=start; start(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

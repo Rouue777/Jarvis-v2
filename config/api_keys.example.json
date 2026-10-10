@@ -1,0 +1,15 @@
+{
+  "_comentario": "Copie para config/api_keys.json OU deixe o app criar na primeira execucao (tela de setup). Nunca envie api_keys.json para o GitHub.",
+  "gemini_api_key": "COLE_SUA_CHAVE_GEMINI_AQUI",
+  "os_system": "windows",
+  "stt_engine": "groq",
+  "brain_engine": "gemini",
+  "plugin_config": {
+    "groq":       { "api_key": "", "model": "whisper-large-v3-turbo", "language": "pt" },
+    "gemini":     { "secondary_key": "", "tertiary_key": "" },
+    "brain":      { "provider": "", "api_key": "", "model": "", "base_url": "", "tts_voice": "", "tts_engine": "", "fish_api_key": "", "fish_voice_id": "", "fish_model": "" },
+    "trello":     { "api_key": "", "token": "", "default_board": "" },
+    "cakto":      { "client_id": "", "client_secret": "", "amounts": {} },
+    "rastracking": { "api_key": "" }
+  }
+}

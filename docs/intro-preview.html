@@ -73,18 +73,22 @@ function shapeCheckout(cx,cy){ const s=L().s, w=300*s, h=230*s; let o=[];
   o.push(...pathSegs(rrectPts(cx,cy,w-48*s,60*s,4),true,10*s,1));
   o.push(...fragments(cx,cy,w*0.45,h*0.42,16,9*s));
   return fit(o,HALF,cx,cy,w*0.5,h*0.5); }
-function shapeText(txt, cx, cy, px){ // bordas do texto viram segmentos
-  const oc=document.createElement('canvas'); const pad=20; oc.width=Math.ceil(px*txt.length*0.95)+pad*2; oc.height=Math.ceil(px*1.4)+pad*2; const g=oc.getContext('2d');
-  g.font='900 '+px+'px "Arial Black", Impact, sans-serif'; g.textAlign='center'; g.textBaseline='middle'; g.fillStyle='#fff'; g.fillText(txt, oc.width/2, oc.height/2);
+function shapeText(txt, cx, cy, px){ // contorno real das letras vira segmentos da malha
+  const oc=document.createElement('canvas'); const pad=24; oc.width=Math.ceil(px*txt.length*0.95)+pad*2; oc.height=Math.ceil(px*1.4)+pad*2; const g=oc.getContext('2d');
+  g.font='900 '+px+'px "Arial Black", Impact, sans-serif'; g.textAlign='center'; g.textBaseline='middle'; g.letterSpacing='0.06em'; g.fillStyle='#fff'; g.fillText(txt, oc.width/2, oc.height/2);
   const d=g.getImageData(0,0,oc.width,oc.height).data, w=oc.width, h=oc.height; const edge=[];
   const on=(x,y)=>x>=0&&y>=0&&x<w&&y<h&&d[(y*w+x)*4+3]>128;
-  for (let y=1;y<h-1;y+=2) for (let x=1;x<w-1;x+=2) if (on(x,y) && (!on(x-2,y)||!on(x+2,y)||!on(x,y-2)||!on(x,y+2))) edge.push({x,y});
-  const out=[]; const ox=cx-w/2, oy=cy-h/2;
-  for (let i=0;i<HALF*0.8 && edge.length;i++){ const p=edge[Math.floor(Math.random()*edge.length)]; let q=null;
-    for (let k=0;k<12;k++){ const c=edge[Math.floor(Math.random()*edge.length)]; const dd=Math.hypot(c.x-p.x,c.y-p.y); if (dd>5&&dd<18){ q=c; break; } }
-    if (!q) q={x:p.x+rnd(-9,9),y:p.y+rnd(-9,9)};
-    out.push({a:{x:ox+p.x,y:oy+p.y},b:{x:ox+q.x,y:oy+q.y}}); }
-  out.push(...fragments(cx,cy,w*0.55,h*0.9,20,8));
+  for (let y=1;y<h-1;y++) for (let x=1;x<w-1;x++) if (on(x,y) && (!on(x-1,y)||!on(x+1,y)||!on(x,y-1)||!on(x,y+1))) edge.push({x,y});
+  // grade para achar o vizinho mais proximo (segue a tangente da letra)
+  const cell=8, grid=new Map(); const key=(x,y)=>((x/cell)|0)+','+((y/cell)|0);
+  edge.forEach(e=>{ const k=key(e.x,e.y); (grid.get(k)||grid.set(k,[]).get(k)).push(e); });
+  const ox=cx-w/2, oy=cy-h/2, out=[]; const want=Math.floor(HALF*0.92); const stepN=Math.max(1,Math.floor(edge.length/want));
+  for (let i=0;i<edge.length && out.length<want;i+=stepN){ const p=edge[i]; let best=null, bd=1e9;
+    for (let gx=-1;gx<=1;gx++) for (let gy=-1;gy<=1;gy++){ const b=grid.get(((p.x/cell|0)+gx)+','+((p.y/cell|0)+gy)); if(!b) continue;
+      for (const q of b){ const dd=Math.hypot(q.x-p.x,q.y-p.y); if (dd>=6&&dd<=11&&dd<bd){ bd=dd; best=q; } } }
+    if (!best) continue;
+    out.push({a:{x:ox+p.x+rnd(-.6,.6),y:oy+p.y+rnd(-.6,.6)},b:{x:ox+best.x+rnd(-.6,.6),y:oy+best.y+rnd(-.6,.6)}}); }
+  out.push(...fragments(cx,cy,w*0.55,h*0.9,10,8));
   return fit(out,HALF,cx,cy,w*0.5,h*0.6); }
 function shapePixel(cx,cy,k){ const s=L().s, R=40*s*k; let o=[]; const inf=[];
   for (let i=0;i<120;i++){ const t=i/120*Math.PI*2; const q=1+Math.sin(t)**2; inf.push({x:cx+R*1.6*Math.cos(t)/q,y:cy+R*1.6*Math.sin(t)*Math.cos(t)/q}); }
@@ -113,7 +117,7 @@ const T = { card: 1.0, chk: 2.4, fly: 3.2, data: 4.4, gone: 5.8, ok: 5.9, chkOut
 let KA=[], KB=[], faceSegs=[];
 function build(){ const {s,cx,cy,farLeft,right}=L(); faceSegs=shapeFace(cx,cy); const fA=faceSegs.slice(0,HALF), fB=faceSegs.slice(HALF,HALF*2);
   const cardL=shapeCard(cx-520*s,cy), cardC=move(cardL,520*s,-150*s);
-  const rastr=shapeText('RASTRACKING',cx,cy,64*s), rastrBig=scaleAbout(rastr,cx,cy,1.12);
+  const rastr=shapeText('RASTRACKING',cx,cy,76*s), rastrBig=scaleAbout(rastr,cx,cy,1.1);
   const chk=shapeCheckout(cx,cy); const pix=shapePixel(cx,cy,1), pixBig=shapePixel(cx,cy,1.9);
   // metade A: particulas → cartao (esq) → cartao (centro) → RASTRACKING → sai pela esquerda → rosto
   KA=[ [0, shapeScatter(HALF,-100,W*0.45)], [T.card+1.4, cardL], [T.fly, cardL], [T.data, cardC], [T.gone-0.2, cardC],
@@ -157,6 +161,9 @@ function frame(now){
   const glowA = t<T.spin ? 3+rPower*24 : 3; const glowB = t<T.spin ? 3+pPower*28 : 3;
   // a metade A some enquanto o cartao "entrega" os dados e renasce como RASTRACKING
   const fadeA = (t>=T.gone-0.2 && t<T.rastr+0.3) ? 1-seg(t,T.gone-0.2,T.gone+0.3) + seg(t,T.rastr-0.2,T.rastr+0.3)*0.0 : 1;
+  { const rIn0=seg(t,T.rastr,T.rastr+1.0), rOut0=ease(seg(t,T.rastrOut,T.rastrOut+1.2)), rA0=rIn0*(1-rOut0), rX0=lerp(cx,farLeft,rOut0);
+    if (rA0>0.02 && t<T.spin){ const k=0.22+rPower*0.5; ctx.save(); ctx.globalAlpha=rA0*k; ctx.font='900 '+(76*s*(1+0.1*seg(t,T.pulse,T.pulse+0.8)))+'px "Arial Black", Impact, sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.letterSpacing='0.06em';
+      glow(TEAL,30+rPower*40); ctx.fillStyle='rgba(28,198,216,0.6)'; ctx.fillText('RASTRACKING',rX0,cy); noglow(); ctx.restore(); } }
   drawMesh(A, Math.max(0.15,fadeA), glowA); drawMesh(B, 1, glowB);
 
   if (t<T.spin){
@@ -179,7 +186,8 @@ function frame(now){
     const fly=ease(seg(t,T.fly,T.data)); const cardPos={x:lerp(cx-520*s,cx,fly),y:lerp(cy,cy-150*s,fly)};
     if (t>=T.data && t<T.gone+0.4) ['pedido','valor','utm','cliente'].forEach((txt,i)=>{ const tt=seg(t,T.data+i*0.25,T.data+i*0.25+0.9); if(tt>0&&tt<1) packet(cardPos,{x:cx,y:cy},tt,txt,20); });
     const rIn=seg(t,T.rastr,T.rastr+1.0), rOut=ease(seg(t,T.rastrOut,T.rastrOut+1.2)), rX=lerp(cx,farLeft,rOut), rA=rIn*(1-rOut);
-    if (rA>0.02){ label('TRACKEAMENTO  ·  ATRIBUICAO  ·  ESCALA',rX,cy+62*s,rA*0.8,12); if (rPower>0) rings(rX,cy,rA*rPower,60*s,300*s,1200,3,false); }
+    if (rA>0.02){
+      label('TRACKEAMENTO  ·  ATRIBUICAO  ·  ESCALA',rX,cy+72*s,rA*0.8,12); if (rPower>0) rings(rX,cy,rA*rPower,60*s,300*s,1200,3,false); }
     if (t>=T.chkOut && t<T.pulse+0.6) ['pedido','valor','utm','cliente','device','origem'].forEach((txt,i)=>{ const tt=seg(t,T.chkOut+i*0.2,T.chkOut+i*0.2+1.0); if(tt>0&&tt<1) packet({x:chkX,y:cy},{x:cx,y:cy},tt,txt,60); });
     const pIn=seg(t,T.pixel,T.pixel+1.2), pX=lerp(L().right,cx,ease(pIn));
     if (pIn>0.9){ label('PIXEL DA META',cx,cy+(130+pPower*100)*s,1,12); if (pPower>0&&t<T.money) rings(cx,cy,1,320*s,90*s,700,4,true); }

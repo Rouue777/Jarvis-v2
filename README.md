@@ -44,6 +44,9 @@ Na primeira execução a tela de setup pede a chave Gemini. As chaves dos
 plugins ficam em ⚙ → PLUGIN SETTINGS. Um modelo do arquivo de configuração
 está em `config/api_keys.example.json`.
 
+Guia ilustrado passo a passo: [docs/instalacao.html](docs/instalacao.html)
+(abra o arquivo no navegador).
+
 ## Segurança das suas chaves
 
 - `config/api_keys.json`, `config/certs/` e `memory/*.json` estão no

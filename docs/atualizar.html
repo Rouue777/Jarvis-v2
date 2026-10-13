@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atualizar o JARVIS</title>
+<meta name="description" content="Manual para atualizar o JARVIS na mão, sem perder chaves, memória e agenda, sempre que sair uma versão nova.">
+<style>
+  :root {
+    --bg: #f6f7fb; --card: #ffffff; --text: #15192b; --muted: #5b6478;
+    --accent: #2f6bff; --accent-soft: #e6edff; --border: #e1e5ef;
+    --code-bg: #0f1424; --code-text: #d9e1ff; --ok: #1a9a5a;
+    --warn-bg: #fff6e0; --warn-border: #f0c75e; --warn-text: #6b4b00;
+    --danger-bg: #ffe9e9; --danger-border: #f0a0a0; --danger-text: #7a1f1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0e18; --card: #141a2b; --text: #e7ebf7; --muted: #96a0b8;
+      --accent: #6d95ff; --accent-soft: #1b2745; --border: #263050;
+      --code-bg: #060912; --code-text: #d9e1ff; --ok: #3ccf84;
+      --warn-bg: #2d2410; --warn-border: #8a6a1f; --warn-text: #f3d58a;
+      --danger-bg: #2d1414; --danger-border: #8a2f2f; --danger-text: #f3a0a0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0e18; --card: #141a2b; --text: #e7ebf7; --muted: #96a0b8;
+    --accent: #6d95ff; --accent-soft: #1b2745; --border: #263050;
+    --code-bg: #060912; --code-text: #d9e1ff; --ok: #3ccf84;
+    --warn-bg: #2d2410; --warn-border: #8a6a1f; --warn-text: #f3d58a;
+    --danger-bg: #2d1414; --danger-border: #8a2f2f; --danger-text: #f3a0a0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 16px 80px; }
+  header { margin-bottom: 30px; }
+  .eyebrow { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 13px; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.1; margin: 8px 0 12px; }
+  h2.sec { font-size: 15px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 34px 0 12px; }
+  .lead { color: var(--muted); font-size: 19px; margin: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 4px 12px; font-size: 14px; font-weight: 600; }
+  .step { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; margin-bottom: 18px; display: grid; grid-template-columns: 48px 1fr; gap: 16px; }
+  .num { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 20px; }
+  .step h2 { margin: 6px 0 8px; font-size: 22px; }
+  .step p { margin: 0 0 10px; }
+  .step p:last-child { margin-bottom: 0; }
+  pre { background: var(--code-bg); color: var(--code-text); border-radius: 10px; padding: 14px 16px; overflow-x: auto; margin: 10px 0; font-size: 15px; line-height: 1.5; }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  p code, li code, td code { background: var(--accent-soft); color: var(--text); padding: 1px 6px; border-radius: 6px; font-size: 15px; }
+  .note { background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text); border-radius: 10px; padding: 12px 14px; margin-top: 10px; font-size: 15px; }
+  .danger { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); border-radius: 10px; padding: 12px 14px; margin-top: 10px; font-size: 15px; }
+  .note strong, .danger strong { color: inherit; }
+  ul { padding-left: 20px; margin: 6px 0; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); }
+  .ok { color: var(--ok); font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 8px 0; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--border); padding-top: 18px; }
+  @media (max-width: 520px) { .step { grid-template-columns: 1fr; padding: 18px; } .num { width: 36px; height: 36px; font-size: 16px; border-radius: 9px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Manual de atualização</div>
+    <h1>Como atualizar o JARVIS na mão</h1>
+    <p class="lead">Sempre que sair uma versão nova, siga este roteiro. Leva uns 3 minutos e você não perde chave, memória nem agenda.</p>
+    <div class="chips">
+      <span class="chip">Sem IA, sem mistério</span>
+      <span class="chip">Mantém suas chaves</span>
+      <span class="chip">Mantém a memória</span>
+      <span class="chip">Windows</span>
+    </div>
+  </header>
+
+  <section class="step">
+    <div class="num">0</div>
+    <div>
+      <h2>O que nunca é apagado numa atualização</h2>
+      <p>Estes arquivos são <strong>seus</strong> e não existem no GitHub. A atualização nunca mexe neles:</p>
+      <table>
+        <tr><th>Arquivo</th><th>O que guarda</th></tr>
+        <tr><td><code>config/api_keys.json</code></td><td>Chave Gemini, chaves dos plugins (Groq, Trello, Cakto…), suas preferências</td></tr>
+        <tr><td><code>config/certs/</code></td><td>Certificado do painel remoto</td></tr>
+        <tr><td><code>memory/long_term.json</code></td><td>O que o JARVIS lembra sobre você</td></tr>
+        <tr><td><code>memory/organizer.json</code></td><td>Tarefas e agenda</td></tr>
+        <tr><td><code>memory/usage.json</code>, <code>briefing_state.json</code></td><td>Uso e estado do briefing</td></tr>
+      </table>
+      <div class="note"><strong>Antes de qualquer atualização, faça uma cópia da pasta <code>config</code> e da pasta <code>memory</code></strong> para um lugar seguro. Se algo der errado, é só colar de volta.</div>
+    </div>
+  </section>
+
+  <h2 class="sec">Caminho A · você instalou com Git (recomendado)</h2>
+
+  <section class="step">
+    <div class="num">1</div>
+    <div>
+      <h2>Feche o JARVIS</h2>
+      <p>Feche a janela do assistente. Se abriu pelo atalho sem terminal, use o ícone na bandeja ou o Gerenciador de Tarefas (processo <code>pythonw.exe</code>).</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">2</div>
+    <div>
+      <h2>Abra o Prompt de Comando na pasta do JARVIS</h2>
+      <p>Abra a pasta do projeto no Explorador, clique na barra de endereço, digite <code>cmd</code> e aperte Enter. Ou:</p>
+      <pre><code>cd %USERPROFILE%\Documents\jarvis-opensource</code></pre>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">3</div>
+    <div>
+      <h2>Puxe a versão nova</h2>
+      <pre><code>git pull</code></pre>
+      <p>Vai listar os arquivos que mudaram e terminar com algo como <span class="ok">Fast-forward</span>. Se aparecer <code>Already up to date.</code>, você já está na última versão.</p>
+      <div class="note"><strong>Deu erro "Your local changes would be overwritten"?</strong> Você editou algum arquivo do código. Para descartar suas edições e aceitar a versão nova, rode <code>git checkout -- .</code> e depois <code>git pull</code> de novo. Suas chaves e memória não entram nisso.</div>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">4</div>
+    <div>
+      <h2>Reinstale as dependências se o aviso pedir</h2>
+      <p>Se na lista do <code>git pull</code> apareceu <code>requirements.txt</code> ou <code>setup.py</code>, rode:</p>
+      <pre><code>py setup.py</code></pre>
+      <p>Se não apareceu, pode pular. Na dúvida, rodar não faz mal, só demora um pouco.</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">5</div>
+    <div>
+      <h2>Abra e confira</h2>
+      <pre><code>py main.py</code></pre>
+      <p>O JARVIS deve abrir normal, com suas chaves e memória no lugar. Se o atalho da área de trabalho parou de funcionar, rode <code>criar-atalho-jarvis.bat</code> de novo.</p>
+    </div>
+  </section>
+
+  <h2 class="sec">Caminho B · você baixou o ZIP, sem Git</h2>
+
+  <section class="step">
+    <div class="num">1</div>
+    <div>
+      <h2>Baixe o ZIP novo</h2>
+      <p>Acesse <a href="https://github.com/jgm-source/jarvis-opensource" target="_blank" rel="noopener">github.com/jgm-source/jarvis-opensource</a>, clique no botão verde <strong>Code → Download ZIP</strong> e extraia em uma pasta nova, por exemplo <code>jarvis-novo</code>.</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">2</div>
+    <div>
+      <h2>Copie o que é seu para a pasta nova</h2>
+      <p>Da pasta antiga para a nova, copie <strong>por cima</strong>:</p>
+      <ul>
+        <li><code>config\api_keys.json</code></li>
+        <li><code>config\certs\</code> (se existir)</li>
+        <li>a pasta <code>memory\</code> inteira</li>
+      </ul>
+      <div class="danger"><strong>Não copie o resto.</strong> Arquivos <code>.py</code>, <code>core\</code>, <code>plugins\</code>, <code>ui.py</code> e <code>main.py</code> da pasta antiga são justamente o que está sendo atualizado.</div>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">3</div>
+    <div>
+      <h2>Instale as dependências e abra</h2>
+      <pre><code>cd jarvis-novo
+py setup.py
+py main.py</code></pre>
+      <p>Funcionou? Apague a pasta antiga e renomeie a nova. Rode <code>criar-atalho-jarvis.bat</code> para o atalho apontar para a pasta certa.</p>
+    </div>
+  </section>
+
+  <h2 class="sec">Depois de atualizar</h2>
+
+  <section class="step">
+    <div class="num">✓</div>
+    <div>
+      <h2>Perguntas comuns</h2>
+      <ul>
+        <li><strong>Como sei qual versão eu tenho?</strong> Na pasta do JARVIS, <code>git log -1 --format=%cd</code> mostra a data da última atualização instalada. Compare com a data do último commit no GitHub.</li>
+        <li><strong>A intro de abertura e o recado não apareceram de novo.</strong> É normal, eles tocam uma vez por PC. Para ver de novo, abra <code>config/api_keys.json</code> e mude <code>"intro_shown": true</code> para <code>false</code>.</li>
+        <li><strong>Apareceu um campo novo nas configurações.</strong> Versões novas podem trazer plugins com chave própria. Preencha em ⚙ → PLUGIN SETTINGS. O que já estava preenchido continua igual.</li>
+        <li><strong>Deu ModuleNotFoundError ao abrir.</strong> Faltou uma dependência nova. Rode <code>py setup.py</code>, ou instale o módulo citado com <code>py -m pip install NOME</code>.</li>
+        <li><strong>Quero voltar para a versão anterior.</strong> Com Git: <code>git log --oneline</code> mostra as versões; <code>git checkout CODIGO</code> volta para uma delas; <code>git checkout main</code> retorna para a mais nova.</li>
+        <li><strong>Perdi minhas chaves.</strong> Cole de volta a cópia de <code>config</code> e <code>memory</code> que você fez no passo 0. Se não fez, gere uma chave Gemini nova no <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">AI Studio</a> e reconfigure os plugins.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    JARVIS é um fork em português do <a href="https://github.com/FatihMakes/Mark-LV" target="_blank" rel="noopener">MARK LV, de FatihMakes</a>, mantido por João Gabriel. Licença CC BY-NC 4.0: uso pessoal, não comercial.
+    Primeira instalação: <a href="instalacao.html">guia de instalação</a>. Código-fonte em <a href="https://github.com/jgm-source/jarvis-opensource" target="_blank" rel="noopener">github.com/jgm-source/jarvis-opensource</a>.
+  </footer>
+</main>
+</body>
+</html>

@@ -49,7 +49,8 @@ plugins ficam em ⚙ → PLUGIN SETTINGS. Um modelo do arquivo de configuração
 está em `config/api_keys.example.json`.
 
 Guia ilustrado passo a passo: [docs/instalacao.html](docs/instalacao.html)
-(abra o arquivo no navegador).
+(abra o arquivo no navegador). Para atualizar quando sair versão nova, sem
+perder chaves nem memória: [docs/atualizar.html](docs/atualizar.html).
 
 ## Intro de abertura
 

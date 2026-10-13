@@ -49,6 +49,30 @@ def focus_url() -> str:
     return str(_cfg().get("focus_music_url") or DEFAULT_URL).strip()
 
 
+def cookies_browser() -> str:
+    """Browser whose YouTube login yt-dlp may borrow ("edge", "chrome",
+    "firefox"; "" = none). YouTube sometimes answers "Sign in to confirm
+    you're not a bot" to anonymous requests; a logged-in browser's cookies
+    get past that. Set as "music_cookies_browser" in config/api_keys.json."""
+    v = str(_cfg().get("music_cookies_browser") or "").strip().lower()
+    return v if v in ("edge", "chrome", "firefox", "brave", "chromium", "opera", "vivaldi") else ""
+
+
+def _ydl_opts(**extra) -> dict:
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
+            "socket_timeout": 15, "retries": 2, "extractor_retries": 1,
+            # Only MP4/AAC audio: it is what the Windows media backend demuxes
+            # without fuss. WebM/Opus streams came back as "Demuxing failed".
+            "format": "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/best[ext=mp4]/bestaudio",
+            # Clients that are not asked for a sign-in as often as the web one.
+            "extractor_args": {"youtube": {"player_client": ["default", "android", "ios"]}}}
+    b = cookies_browser()
+    if b:
+        opts["cookiesfrombrowser"] = (b,)
+    opts.update(extra)
+    return opts
+
+
 def volume() -> float:
     try:
         return max(0.0, min(1.0, float(_cfg().get("music_volume", DEFAULT_VOLUME))))
@@ -95,10 +119,7 @@ def download_audio(url: str) -> tuple[str, str]:
     import yt_dlp
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     have = cached_file(url)
-    opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "outtmpl": str(CACHE_DIR / "%(id)s.%(ext)s"),
-            "skip_download": bool(have)}
+    opts = _ydl_opts(outtmpl=str(CACHE_DIR / "%(id)s.%(ext)s"), skip_download=bool(have))
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=not have)
     if info and info.get("entries"):
@@ -119,8 +140,7 @@ def download_audio(url: str) -> tuple[str, str]:
 def resolve_audio(url: str) -> tuple[str, str]:
     """(audio_stream_url, title) for one video. Raises with a reason."""
     import yt_dlp
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
-            "noplaylist": True, "format": "bestaudio[ext=m4a]/bestaudio/best"}
+    opts = _ydl_opts(skip_download=True)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     if info and info.get("entries"):
@@ -128,13 +148,16 @@ def resolve_audio(url: str) -> tuple[str, str]:
     if not info:
         raise RuntimeError("nothing found")
     stream = info.get("url")
-    if not stream:
+    ext = str(info.get("ext") or "")
+    if not stream or ext not in ("m4a", "mp4", "mp3", ""):
+        # Pick an MP4/AAC audio-only format by hand; never WebM/Opus.
         fmts = [f for f in (info.get("formats") or []) if f.get("url")
-                and f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
+                and f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
+                and (str(f.get("ext") or "") in ("m4a", "mp4") or str(f.get("acodec") or "").startswith("mp4a"))]
         fmts.sort(key=lambda f: (f.get("language_preference") or 0, f.get("abr") or f.get("tbr") or 0))
-        stream = fmts[-1]["url"] if fmts else ""
+        stream = fmts[-1]["url"] if fmts else (stream or "")
     if not stream:
-        raise RuntimeError("no audio stream offered")
+        raise RuntimeError("no playable (MP4/AAC) audio stream offered")
     return stream, str(info.get("title") or "")
 
 

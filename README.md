@@ -26,7 +26,11 @@ Plugins novos (pasta `plugins/`):
 | `trello_control.py` | Quadros, listas e cartões do Trello por voz |
 
 Núcleo novo (pasta `core/`): `brain.py`, `briefing_sources.py`, `groq_stt.py`,
-`holo.py`, `music.py`, `numwords.py`, `usage.py`. Além disso: personalidade de
+`holo.py`, `music.py`, `numwords.py`, `usage.py`, `agenda_sync.py` (espelho
+de duas vias entre a agenda local e uma lista do Trello, com tela
+📅 AGENDAMENTOS no painel ⚙ e comando por voz "muda a call para 17h").
+O cérebro econômico tem limite de contexto e recuperação automática, com
+diagnóstico em `memory/brain_debug.txt`. Além disso: personalidade de
 mordomo em `core/prompt.txt`, mais vozes Gemini, filtro por nome e ajustes em
 avatar, TTS, STT, hotkey e dashboard. O script `criar-atalho-jarvis.bat` cria
 um ícone na área de trabalho que abre o JARVIS sem janela de terminal.

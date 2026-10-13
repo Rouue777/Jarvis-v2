@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 
 try:
@@ -2548,6 +2549,374 @@ class ClipboardPanel(QWidget):
         self._dismiss_timer.start(8000)
 
 
+class AgendaOverlay(QWidget):
+    """⚙ → 📅 AGENDAMENTOS: the appointments table, editable, plus the Trello
+    mirror settings (switch, board, list). Every row is one organizer event in
+    the house format "[DD/MM/YYYY HH:MM] - Título"; the Trello column shows ✓
+    when the card exists. Edits here go through the same organizer API the
+    voice uses, so they reach Trello the same way."""
+
+    _OW = 720
+    _boards_sig = pyqtSignal(object, str)     # boards list | None, error
+    _lists_sig = pyqtSignal(object, str)      # lists list | None, error
+    _sync_sig = pyqtSignal(str)               # summary line
+
+    def __init__(self, parent=None, log=None):
+        super().__init__(parent)
+        self._log_fn = log or (lambda t: None)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            AgendaOverlay {{ background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B}; border-radius: 6px; }}
+            QLineEdit {{ background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER};
+                border-radius: 3px; padding: 4px 8px; }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+            QComboBox {{ background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER};
+                border-radius: 3px; padding: 2px 8px; }}
+            QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT};
+                selection-background-color: {C.PRI_GHO}; }}
+            QTableWidget {{ background: #000a10; color: {C.TEXT}; gridline-color: {C.BORDER};
+                border: 1px solid {C.BORDER}; selection-background-color: {C.PRI_GHO};
+                selection-color: {C.PRI}; }}
+            QHeaderView::section {{ background: {C.DARK}; color: {C.TEXT_DIM};
+                border: none; border-bottom: 1px solid {C.BORDER}; padding: 3px; }}
+        """)
+        self._boards_sig.connect(self._on_boards)
+        self._lists_sig.connect(self._on_lists)
+        self._sync_sig.connect(self._on_synced)
+        self._boards: list[dict] = []
+        self._lists: list[dict] = []
+        self._editing: str | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 14, 20, 14)
+        root.setSpacing(8)
+        root.addWidget(self._lbl("📅  AGENDAMENTOS", 12, True))
+
+        # ── table ────────────────────────────────────────────────────────
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["DATA", "HORA", "TÍTULO", "TRELLO"])
+        self._table.setFont(QFont("Courier New", 9))
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._on_select)
+        self._table.itemDoubleClicked.connect(lambda *_: self._edit_selected())
+        root.addWidget(self._table, 1)
+
+        # ── editor row ───────────────────────────────────────────────────
+        ed = QHBoxLayout(); ed.setSpacing(6)
+        self._ed_date = QLineEdit(); self._ed_date.setPlaceholderText("DD/MM/AAAA"); self._ed_date.setFixedWidth(104)
+        self._ed_time = QLineEdit(); self._ed_time.setPlaceholderText("HH:MM"); self._ed_time.setFixedWidth(64)
+        self._ed_title = QLineEdit(); self._ed_title.setPlaceholderText("Título do compromisso")
+        self._ed_lead = QLineEdit(); self._ed_lead.setPlaceholderText("aviso min"); self._ed_lead.setFixedWidth(76)
+        self._ed_lead.setToolTip("Minutos antes para o JARVIS avisar por voz (0 = sem aviso)")
+        for w in (self._ed_date, self._ed_time, self._ed_title, self._ed_lead):
+            w.setFont(QFont("Courier New", 9)); w.setFixedHeight(30)
+        ed.addWidget(self._ed_date); ed.addWidget(self._ed_time); ed.addWidget(self._ed_title, 1); ed.addWidget(self._ed_lead)
+        root.addLayout(ed)
+
+        btns = QHBoxLayout(); btns.setSpacing(6)
+        self._b_save = self._btn("＋  ADICIONAR", self._save_edit, primary=True)
+        self._b_edit = self._btn("✎  EDITAR", self._edit_selected)
+        self._b_del = self._btn("✕  REMOVER", self._remove_selected)
+        self._b_cancel = self._btn("CANCELAR", self._cancel_edit)
+        self._b_cancel.hide()
+        for b in (self._b_save, self._b_edit, self._b_del, self._b_cancel):
+            btns.addWidget(b)
+        btns.addStretch(1)
+        root.addLayout(btns)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        root.addWidget(sep)
+
+        # ── Trello mirror ────────────────────────────────────────────────
+        root.addWidget(self._lbl("TRELLO — espelhar os agendamentos em uma coluna", 9, True, C.PRI,
+                                 Qt.AlignmentFlag.AlignLeft))
+        tr = QHBoxLayout(); tr.setSpacing(6)
+        self._sync_btn = QPushButton()
+        self._sync_btn.setCheckable(True)
+        self._sync_btn.setFixedHeight(30)
+        self._sync_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sync_btn.clicked.connect(self._toggle_sync)
+        tr.addWidget(self._sync_btn)
+        self._board_cb = QComboBox(); self._board_cb.setFixedHeight(30); self._board_cb.setFont(QFont("Courier New", 9))
+        self._list_cb = QComboBox(); self._list_cb.setFixedHeight(30); self._list_cb.setFont(QFont("Courier New", 9))
+        self._board_cb.currentIndexChanged.connect(self._board_changed)
+        tr.addWidget(self._lbl("QUADRO", 8, False, C.TEXT_DIM)); tr.addWidget(self._board_cb, 1)
+        tr.addWidget(self._lbl("COLUNA", 8, False, C.TEXT_DIM)); tr.addWidget(self._list_cb, 1)
+        root.addLayout(tr)
+
+        tr2 = QHBoxLayout(); tr2.setSpacing(6)
+        tr2.addWidget(self._btn("▸  SALVAR TRELLO", self._save_trello, primary=True))
+        tr2.addWidget(self._btn("⟳  SINCRONIZAR AGORA", self._sync_now))
+        tr2.addWidget(self._btn("↻  RECARREGAR QUADROS", self._load_boards))
+        tr2.addStretch(1)
+        root.addLayout(tr2)
+        self._status = self._lbl("", 8, False, C.TEXT_DIM, Qt.AlignmentFlag.AlignLeft)
+        self._status.setWordWrap(True)
+        root.addWidget(self._status)
+
+        close = self._btn("CLOSE", self._close)
+        row = QHBoxLayout(); row.addStretch(1); row.addWidget(close)
+        root.addLayout(row)
+
+        self._refresh_sync_btn()
+        self.reload()
+        self._load_boards()
+
+    # ── helpers ───────────────────────────────────────────────────────────
+    def _lbl(self, txt, fs=9, bold=False, color=C.PRI, align=Qt.AlignmentFlag.AlignCenter):
+        w = QLabel(txt); w.setAlignment(align)
+        w.setFont(QFont("Courier New", fs, QFont.Weight.Bold if bold else QFont.Weight.Normal))
+        w.setStyleSheet(f"color: {color}; background: transparent;")
+        return w
+
+    def _btn(self, txt, slot, primary=False):
+        b = QPushButton(txt); b.setFixedHeight(30)
+        b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        fg = C.PRI if primary else C.TEXT_DIM
+        b.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {fg}; border: 1px solid {C.BORDER_B if primary else C.BORDER};
+                border-radius: 3px; padding: 0 10px; }}
+            QPushButton:hover {{ color: {C.PRI}; border: 1px solid {C.PRI}; background: {C.PRI_GHO}; }}""")
+        b.clicked.connect(slot)
+        return b
+
+    def _say(self, msg: str, ok: bool = True):
+        self._status.setText(msg)
+        self._status.setStyleSheet(f"color: {C.PRI if ok else '#ff6b6b'}; background: transparent;")
+
+    def _close(self):
+        self.hide(); self.deleteLater()
+
+    # ── table ─────────────────────────────────────────────────────────────
+    def reload(self):
+        try:
+            from plugins.organizer import events_all
+            events = events_all()
+        except Exception as e:
+            events = []
+            self._say(f"Agenda indisponível: {e}", ok=False)
+        self._events = events
+        self._table.setRowCount(0)
+        for e in events:
+            r = self._table.rowCount(); self._table.insertRow(r)
+            try:
+                d = time.strftime("%d/%m/%Y", time.strptime(e["date"], "%Y-%m-%d"))
+            except Exception:
+                d = e.get("date", "")
+            cells = [d, e.get("time") or "", e.get("title", ""), "✓" if e.get("trello_id") else "—"]
+            for c, val in enumerate(cells):
+                it = QTableWidgetItem(val)
+                it.setData(Qt.ItemDataRole.UserRole, e["id"])
+                if c in (0, 1, 3):
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table.setItem(r, c, it)
+
+    def _selected_id(self) -> str | None:
+        rows = self._table.selectionModel().selectedRows() if self._table.selectionModel() else []
+        if not rows:
+            return None
+        it = self._table.item(rows[0].row(), 0)
+        return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+    def _on_select(self):
+        pass
+
+    def _edit_selected(self):
+        eid = self._selected_id()
+        e = next((x for x in self._events if x["id"] == eid), None)
+        if not e:
+            self._say("Selecione um compromisso na tabela.", ok=False); return
+        self._editing = eid
+        try:
+            self._ed_date.setText(time.strftime("%d/%m/%Y", time.strptime(e["date"], "%Y-%m-%d")))
+        except Exception:
+            self._ed_date.setText(e.get("date", ""))
+        self._ed_time.setText(e.get("time") or "")
+        self._ed_title.setText(e.get("title", ""))
+        self._ed_lead.setText(str(e.get("remind_minutes", 10)))
+        self._b_save.setText("✔  SALVAR ALTERAÇÃO")
+        self._b_cancel.show()
+        self._ed_title.setFocus()
+
+    def _cancel_edit(self):
+        self._editing = None
+        for w in (self._ed_date, self._ed_time, self._ed_title, self._ed_lead):
+            w.clear()
+        self._b_save.setText("＋  ADICIONAR")
+        self._b_cancel.hide()
+
+    def _save_edit(self):
+        title = self._ed_title.text().strip()
+        d_txt, t_txt = self._ed_date.text().strip(), self._ed_time.text().strip()
+        if not title:
+            self._say("Falta o título.", ok=False); return
+        try:
+            d_iso = time.strftime("%Y-%m-%d", time.strptime(d_txt, "%d/%m/%Y"))
+        except Exception:
+            self._say("Data inválida — use DD/MM/AAAA.", ok=False); return
+        try:
+            hh, mm = (t_txt or "09:00").split(":"); t_hm = f"{int(hh):02d}:{int(mm):02d}"
+            assert 0 <= int(hh) < 24 and 0 <= int(mm) < 60
+        except Exception:
+            self._say("Hora inválida — use HH:MM.", ok=False); return
+        try:
+            lead = int(self._ed_lead.text().strip() or 10)
+        except Exception:
+            lead = 10
+        try:
+            from plugins.organizer import event_add, event_update
+            if self._editing:
+                e = event_update(self._editing, title=title, date=d_iso, time=t_hm, remind_minutes=lead)
+                self._say(f"Alterado: [{d_txt} {t_hm}] - {title}" + ("  (Trello atualizado)" if e and e.get("trello_id") else ""))
+            else:
+                e = event_add(title, d_iso, t_hm, lead)
+                if e.get("_dup"):
+                    self._say("Esse compromisso já existe.", ok=False)
+                else:
+                    self._say(f"Adicionado: [{d_txt} {t_hm}] - {title}" + ("  (e no Trello)" if e.get("trello_id") else ""))
+        except Exception as ex:
+            self._say(f"Não foi possível salvar: {ex}", ok=False); return
+        self._cancel_edit()
+        self.reload()
+
+    def _remove_selected(self):
+        eid = self._selected_id()
+        e = next((x for x in self._events if x["id"] == eid), None)
+        if not e:
+            self._say("Selecione um compromisso na tabela.", ok=False); return
+        try:
+            from plugins.organizer import event_remove
+            event_remove(eid)
+            self._say(f"Removido: {e['title']}" + ("  (cartão arquivado no Trello)" if e.get("trello_id") else ""))
+        except Exception as ex:
+            self._say(f"Não foi possível remover: {ex}", ok=False)
+        self._cancel_edit()
+        self.reload()
+
+    # ── Trello settings ──────────────────────────────────────────────────
+    def _refresh_sync_btn(self):
+        try:
+            from core.agenda_sync import config
+            on = config()["enabled"]
+        except Exception:
+            on = False
+        self._sync_btn.setChecked(on)
+        self._sync_btn.setText("🔗  SINCRONIZAR COM TRELLO: ON" if on else "🔗  SINCRONIZAR COM TRELLO: OFF")
+        self._sync_btn.setStyleSheet(f"""
+            QPushButton {{ background: {'#001a08' if on else 'transparent'}; color: {C.GREEN if on else C.TEXT_DIM};
+                border: 1px solid {C.GREEN_D if on else C.BORDER}; border-radius: 3px; padding: 0 10px; }}""")
+
+    def _toggle_sync(self, checked: bool):
+        try:
+            from core.agenda_sync import save_config
+            save_config(trello_sync=bool(checked))
+        except Exception as ex:
+            self._say(f"Não salvou: {ex}", ok=False)
+        self._refresh_sync_btn()
+        if checked:
+            self._say("Espelho ligado. Escolha o quadro e a coluna e clique SALVAR TRELLO.")
+        else:
+            self._say("Espelho desligado: os compromissos ficam só no JARVIS.")
+
+    def _load_boards(self):
+        self._say("Carregando quadros do Trello…")
+        def work():
+            try:
+                from core.agenda_sync import boards
+                self._boards_sig.emit(boards(), "")
+            except Exception as ex:
+                self._boards_sig.emit(None, str(ex))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_boards(self, boards, err):
+        if boards is None:
+            self._say("Trello indisponível — confira a chave e o token em PLUGIN SETTINGS → TRELLO. " + err[:80], ok=False)
+            return
+        self._boards = boards
+        from core.agenda_sync import config
+        cfg = config()
+        self._board_cb.blockSignals(True)
+        self._board_cb.clear()
+        for b in boards:
+            self._board_cb.addItem(b["name"], b["id"])
+        idx = self._board_cb.findData(cfg["board_id"]) if cfg["board_id"] else -1
+        if idx < 0 and cfg["board_name"]:
+            idx = self._board_cb.findText(cfg["board_name"])
+        self._board_cb.setCurrentIndex(max(0, idx))
+        self._board_cb.blockSignals(False)
+        self._say(f"{len(boards)} quadro(s) carregado(s).")
+        self._board_changed()
+
+    def _board_changed(self, *_):
+        bid = self._board_cb.currentData()
+        if not bid:
+            return
+        def work():
+            try:
+                from core.agenda_sync import lists
+                self._lists_sig.emit(lists(bid), "")
+            except Exception as ex:
+                self._lists_sig.emit(None, str(ex))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_lists(self, lists, err):
+        if lists is None:
+            self._say("Não consegui ler as colunas: " + err[:80], ok=False); return
+        self._lists = lists
+        from core.agenda_sync import config
+        cfg = config()
+        self._list_cb.clear()
+        for l in lists:
+            self._list_cb.addItem(l["name"], l["id"])
+        idx = self._list_cb.findData(cfg["list_id"]) if cfg["list_id"] else -1
+        if idx < 0 and cfg["list_name"]:
+            idx = self._list_cb.findText(cfg["list_name"])
+        self._list_cb.setCurrentIndex(max(0, idx))
+
+    def _save_trello(self):
+        bid, lid = self._board_cb.currentData(), self._list_cb.currentData()
+        if not bid or not lid:
+            self._say("Escolha o quadro e a coluna primeiro.", ok=False); return
+        try:
+            from core.agenda_sync import save_config
+            save_config(board_id=bid, board_name=self._board_cb.currentText(),
+                        list_id=lid, list_name=self._list_cb.currentText())
+            self._say(f"Trello: quadro '{self._board_cb.currentText()}', coluna '{self._list_cb.currentText()}'. "
+                      + ("Sincronizando…" if self._sync_btn.isChecked() else "Ligue o espelho para sincronizar."))
+            self._log_fn(f"SYS: Appointments mirror → Trello '{self._board_cb.currentText()}' / '{self._list_cb.currentText()}'.")
+            if self._sync_btn.isChecked():
+                self._sync_now()
+        except Exception as ex:
+            self._say(f"Não salvou: {ex}", ok=False)
+
+    def _sync_now(self):
+        self._say("Sincronizando com o Trello…")
+        def work():
+            try:
+                from core.agenda_sync import sync_now
+                self._sync_sig.emit(sync_now())
+            except Exception as ex:
+                self._sync_sig.emit(f"Trello sync failed: {ex}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_synced(self, msg: str):
+        self._say(msg, ok="failed" not in msg)
+        self._log_fn("SYS: " + msg)
+        self.reload()
+
+
 class PluginSettingsOverlay(QWidget):
     """Floating overlay — renders per-plugin settings forms.
 
@@ -4769,6 +5138,12 @@ class MainWindow(QMainWindow):
         self._humor_btn.clicked.connect(self._toggle_humor)
         self._refresh_humor_btn()
 
+        appts_btn = _row(QPushButton("🗓  AGENDAMENTOS (tabela + Trello)"), self._BTN_DIM)
+        appts_btn.setToolTip("Every appointment in a table you can edit, and the Trello mirror: "
+                             "pick the board and the list once; from then on each appointment is "
+                             "created in both places and kept in sync both ways.")
+        appts_btn.clicked.connect(self._open_agenda_overlay)
+
         agenda_btn = _row(QPushButton("📅  AGENDA & TASKS"), self._BTN_DIM)
         agenda_btn.setToolTip("Show today's events, tasks due and overdue, and open lists "
                               "in the panel below the head. Everything here is managed by "
@@ -6172,6 +6547,16 @@ class MainWindow(QMainWindow):
         ov.show()
         ov.raise_()
         self._plugin_manager_overlay = ov   # keep a reference so it isn't GC'd
+
+    def _open_agenda_overlay(self):
+        cw = self.centralWidget()
+        ov = AgendaOverlay(parent=cw, log=self._log.append_log)
+        ow = min(AgendaOverlay._OW, cw.width() - 16)
+        oh = min(600, cw.height() - 16)
+        ov.setGeometry((cw.width() - ow) // 2, (cw.height() - oh) // 2, ow, oh)
+        ov.show(); ov.raise_()
+        self._agenda_overlay = ov
+        self._close_drawers()
 
     def _open_plugin_settings(self):
         sections = self.get_plugin_settings() if self.get_plugin_settings else []

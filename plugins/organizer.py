@@ -42,14 +42,16 @@ PLUGIN = {
         "'note that…', 'mark the dentist Friday at 3', 'what's overdue'. Dates and "
         "times must be ISO (YYYY-MM-DD, HH:MM) worked out from the current date in "
         "your context. Not for Trello boards (trello_control) and not for a plain "
-        "timed alert with no task behind it (reminder)."
+        "timed alert with no task behind it (reminder). Appointments are mirrored "
+        "to the configured Trello list automatically — never create a Trello card "
+        "for an appointment yourself; add_event does it."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {"type": "STRING", "description": (
                 "One of: add_task, complete_task, reopen_task, remove_task, list_tasks, "
-                "add_event, remove_event, list_events, agenda, "
+                "add_event, remove_event, move_event (change date/time/title of an event), list_events, agenda, "
                 "add_item, check_item, remove_item, show_list, clear_list, remove_list, lists, "
                 "add_note, list_notes, remove_note, dedupe, undo. "
                 "dedupe removes duplicated tasks/events (same title and day), keeping one.")},
@@ -61,6 +63,7 @@ PLUGIN = {
             "remind_minutes": {"type": "INTEGER", "description": "Event: speak a reminder this many minutes before (default 10)"},
             "filter": {"type": "STRING", "description": "list_tasks: open (default) | overdue | today | done | all; list_events: today | tomorrow | week (default)"},
             "note": {"type": "STRING", "description": "Extra description for a task or event"},
+            "new_title": {"type": "STRING", "description": "move_event: the new title, if renaming"},
         },
         "required": ["action"],
     },
@@ -280,6 +283,88 @@ def _new_id(data: dict) -> str:
     return f"{n}"
 
 
+# ── events: one API for the voice tool, the ⚙ screen and the Trello sync ──────
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def events_all() -> list[dict]:
+    with _lock:
+        return sorted(copy.deepcopy(_load()["events"]),
+                      key=lambda e: (e.get("date") or "", e.get("time") or ""))
+
+
+def event_add(title: str, date_iso: str, time_hm: str | None = "09:00", remind_minutes: int = 10,
+              note: str = "", trello_id: str | None = None, _sync: bool = True) -> dict:
+    """Create an event (duplicates by title+date+time are returned, not
+    recreated). With _sync, the Trello card is created too."""
+    title = (title or "").strip()
+    t = time_hm or "09:00"
+    def f(data):
+        dup = next((x for x in data["events"] if _fold(x["title"]) == _fold(title)
+                    and x["date"] == date_iso and (x.get("time") or "09:00") == t), None)
+        if dup:
+            if trello_id and not dup.get("trello_id"):
+                dup["trello_id"] = trello_id
+            return dict(dup, _dup=True)
+        e = {"id": _new_id(data), "title": title, "date": date_iso, "time": t,
+             "remind_minutes": max(0, int(remind_minutes or 0)), "note": (note or "").strip(),
+             "updated": _now_iso()}
+        if trello_id:
+            e["trello_id"] = trello_id
+        data["events"].append(e)
+        return dict(e)
+    e = _mutate(f)
+    if _sync and not e.get("_dup") and not e.get("trello_id"):
+        try:
+            from core import agenda_sync
+            cid = agenda_sync.on_event_added(e)
+            if cid:
+                event_update(e["id"], trello_id=cid, _sync=False)
+                e["trello_id"] = cid
+        except Exception:
+            pass
+    return e
+
+
+def event_update(event_id: str, _sync: bool = True, **fields) -> dict | None:
+    def f(data):
+        e = next((x for x in data["events"] if x["id"] == str(event_id)), None)
+        if not e:
+            return None
+        for k, v in fields.items():
+            if k in ("title", "date", "time", "remind_minutes", "note", "trello_id") and v is not None:
+                e[k] = v
+        if any(k in fields for k in ("title", "date", "time", "note", "remind_minutes")):
+            e["updated"] = _now_iso()
+        return dict(e)
+    e = _mutate(f)
+    if e and _sync and any(k in fields for k in ("title", "date", "time")):
+        try:
+            from core import agenda_sync
+            agenda_sync.on_event_changed(e)
+        except Exception:
+            pass
+    return e
+
+
+def event_remove(event_id: str, _sync: bool = True) -> dict | None:
+    def f(data):
+        e = next((x for x in data["events"] if x["id"] == str(event_id)), None)
+        if e:
+            data["events"].remove(e)
+        return dict(e) if e else None
+    e = _mutate(f)
+    if e and _sync:
+        try:
+            from core import agenda_sync
+            agenda_sync.on_event_removed(e)
+        except Exception:
+            pass
+    return e
+
+
 def _do(p: dict, show) -> str:
     a = (p.get("action") or "").strip().lower()
     title = (p.get("title") or "").strip()
@@ -346,23 +431,33 @@ def _do(p: dict, show) -> str:
         t = _parse_time(p.get("time")) or "09:00"
         lead = p.get("remind_minutes")
         lead = int(lead) if lead not in (None, "") else 10
-        def f(data):
-            dup = next((x for x in data["events"] if _fold(x["title"]) == _fold(title)
-                        and x["date"] == d and x.get("time") == t), None)
-            if dup:
-                return f"'{dup['title']}' já está marcado para {_fmt_when(d, t)}; não marquei de novo."
-            data["events"].append({"id": _new_id(data), "title": title, "date": d, "time": t,
-                                   "remind_minutes": max(0, lead), "note": (p.get("note") or "").strip()})
-            return (f"Marcado: {title}, {_fmt_when(d, t)}"
-                    + (f", aviso {lead} minuto{'s' if lead != 1 else ''} antes." if lead else "."))
-        return _mutate(f)
+        e = event_add(title, d, t, lead, p.get("note") or "")
+        if e.get("_dup"):
+            return f"'{e['title']}' já está marcado para {_fmt_when(d, t)}; não marquei de novo."
+        where = " e no Trello" if e.get("trello_id") else ""
+        return (f"Marcado{where}: {title}, {_fmt_when(d, t)}"
+                + (f", aviso {lead} minuto{'s' if lead != 1 else ''} antes." if lead else "."))
 
     if a == "remove_event":
-        def f(data):
-            e = _pick(data["events"], title, "title", "event")
-            data["events"].remove(e)
-            return f"Compromisso removido: {e['title']}."
-        return _mutate(f)
+        e = _pick(_load()["events"], title, "title", "event")
+        event_remove(e["id"])
+        return f"Compromisso removido: {e['title']}." + (" (e arquivado no Trello)" if e.get("trello_id") else "")
+
+    if a in ("move_event", "update_event", "reschedule_event"):
+        e = _pick(_load()["events"], title, "title", "event")
+        fields = {}
+        if (p.get("date") or "").strip():
+            fields["date"] = _parse_date(p["date"]).isoformat()
+        if (p.get("time") or "").strip():
+            fields["time"] = _parse_time(p.get("time")) or e.get("time")
+        if (p.get("new_title") or "").strip():
+            fields["title"] = p["new_title"].strip()
+        if p.get("remind_minutes") not in (None, ""):
+            fields["remind_minutes"] = int(p["remind_minutes"])
+        if not fields:
+            raise ValueError("What should change? Give a new date, time or title.")
+        e2 = event_update(e["id"], **fields)
+        return f"Alterado: {e2['title']}, {_fmt_when(e2['date'], e2.get('time'))}." + (" Trello atualizado." if e2.get("trello_id") else "")
 
     if a in ("list_events", "agenda"):
         data = _load()

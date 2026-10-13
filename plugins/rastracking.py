@@ -40,6 +40,11 @@ PLUGIN = {
         "asks for the biggest/top clients; "
         "expiring_clients — which clients' plans expire today / this week / in a range, "
         "or are already overdue; "
+        "sales_count — how many individual sales (and their sum) match a filter: below/above "
+        "an amount, attributed or not, by payment method, by client, in a period ('quantas "
+        "vendas abaixo de 300 reais hoje'); "
+        "sales_summary — ticket médio, sales by amount range, by payment method and by hour "
+        "for a period; last_sales — the most recent individual sales; "
         "support_pending — which clients sent a support message that is still waiting "
         "for a reply. By default it returns only names and waiting time; set "
         "with_subject=true ONLY when the user explicitly asks what the message/subject "
@@ -51,7 +56,20 @@ PLUGIN = {
         "type": "OBJECT",
         "properties": {
             "action": {"type": "STRING",
-                       "description": "tracked_revenue | top_clients | expiring_clients | support_pending"},
+                       "description": "tracked_revenue | top_clients | sales_count | sales_summary | "
+                                      "last_sales | expiring_clients | support_pending"},
+            "min_amount": {"type": "NUMBER",
+                           "description": "sales_count: only sales of at least this value in reais"},
+            "max_amount": {"type": "NUMBER",
+                           "description": "sales_count: only sales up to this value in reais "
+                                          "(e.g. 'abaixo de 300' → max_amount 299.99)"},
+            "attributed": {"type": "BOOLEAN",
+                           "description": "sales_count/last_sales: true = only sales attributed to an "
+                                          "ad; false = only unattributed; omit = all"},
+            "payment_method": {"type": "STRING",
+                               "description": "sales_count/last_sales: pix | credit_card | boleto …"},
+            "client": {"type": "STRING", "description": "client name (or id) to restrict to"},
+            "limit": {"type": "INTEGER", "description": "last_sales: how many (default 5)"},
             "period": {"type": "STRING",
                        "description": "today (default) | yesterday | week | month | overdue "
                                       "(expiring_clients only) | custom (then give start and end)"},
@@ -359,23 +377,285 @@ def briefing_summary() -> str:
     return "\n".join(out)
 
 
+# ── individual sales (GET /sales, GET /sales/summary) ────────────────────────
+# Added to the Rastracking API on request. Field names are read tolerantly
+# because the final implementation may differ a little from the spec.
+
+def _num(v) -> float:
+    try:
+        return float(str(v).replace(",", ".")) if v not in (None, "") else 0.0
+    except Exception:
+        return 0.0
+
+
+def _sale_amount(x: dict) -> float:
+    for k in ("amount", "value", "total", "saleAmount"):
+        if x.get(k) is not None:
+            return _num(x[k])
+    return 0.0
+
+
+def _sale_when(x: dict) -> datetime | None:
+    return _parse_dt(x.get("saleDate") or x.get("sale_date") or x.get("createdAt") or x.get("date"))
+
+
+def _sale_attributed(x: dict) -> bool:
+    if isinstance(x.get("attributed"), bool):
+        return x["attributed"]
+    return bool(x.get("campaign") or x.get("campaignId") or x.get("ad") or x.get("adId"))
+
+
+def _sale_method(x: dict) -> str:
+    return str(x.get("paymentMethod") or x.get("payment_method") or x.get("method") or "?").lower()
+
+
+def _sale_client(x: dict) -> str:
+    c = x.get("client")
+    if isinstance(c, dict):
+        return str(c.get("name") or c.get("id") or "?")
+    return str(x.get("clientName") or x.get("client_name") or x.get("clientId") or c or "?")
+
+
+def _sale_product(x: dict) -> str:
+    pr = x.get("product")
+    if isinstance(pr, dict):
+        return str(pr.get("name") or pr.get("id") or "")
+    return str(x.get("productName") or pr or "")
+
+
+def _sales_filters(period, start, end, min_amount=None, max_amount=None, attributed=None,
+                   payment_method="", client="") -> tuple[dict, str]:
+    a, b, label = _period(period, start, end)
+    params = dict(startDate=a.isoformat(), endDate=b.isoformat(), limit=100)
+    if min_amount is not None:
+        params["minAmount"] = f"{float(min_amount):.2f}"
+    if max_amount is not None:
+        params["maxAmount"] = f"{float(max_amount):.2f}"
+    if isinstance(attributed, bool):
+        params["attributed"] = "true" if attributed else "false"
+    if payment_method:
+        params["paymentMethod"] = str(payment_method).strip().lower()
+    if client and not any(ch.isspace() for ch in client) and len(client) >= 16:
+        params["clientId"] = client          # looks like an id; names are matched locally
+    return params, label
+
+
+def _iter_sales(params: dict, values: dict | None = None):
+    for page in _pages("sales", values, **params):
+        for x in page.get("data") or []:
+            if isinstance(x, dict):
+                yield x
+
+
+def _filter_desc(min_amount, max_amount, attributed, payment_method, client) -> str:
+    bits = []
+    if min_amount is not None and max_amount is not None:
+        bits.append(f"entre {_fmt(min_amount)} e {_fmt(max_amount)}")
+    elif max_amount is not None:
+        bits.append(f"até {_fmt(max_amount)}")
+    elif min_amount is not None:
+        bits.append(f"a partir de {_fmt(min_amount)}")
+    if attributed is True:
+        bits.append("atribuídas a anúncios")
+    elif attributed is False:
+        bits.append("sem atribuição")
+    if payment_method:
+        bits.append(f"via {payment_method}")
+    if client:
+        bits.append(f"do cliente {client}")
+    return (" " + ", ".join(bits)) if bits else ""
+
+
+def sales_count(period, start="", end="", min_amount=None, max_amount=None, attributed=None,
+                payment_method="", client="", values=None):
+    params, label = _sales_filters(period, start, end, min_amount, max_amount, attributed,
+                                   payment_method, client)
+    n, total, by_method = 0, 0.0, {}
+    name_filter = client.strip().lower() if client and "clientId" not in params else ""
+    for x in _iter_sales(params, values):
+        if name_filter and name_filter not in _sale_client(x).lower():
+            continue
+        amt = _sale_amount(x)
+        # Re-check the amount bounds locally, in case the server ignored them.
+        if min_amount is not None and amt < float(min_amount) - 1e-9:
+            continue
+        if max_amount is not None and amt > float(max_amount) + 1e-9:
+            continue
+        if isinstance(attributed, bool) and _sale_attributed(x) != attributed:
+            continue
+        n += 1
+        total += amt
+        m = _sale_method(x)
+        by_method[m] = by_method.get(m, 0) + 1
+    desc = _filter_desc(min_amount, max_amount, attributed, payment_method, client)
+    if n == 0:
+        spoken = f"Nenhuma venda{desc} trackeada {label}."
+    else:
+        spoken = (f"{n} venda{'s' if n != 1 else ''}{desc} trackeada{'s' if n != 1 else ''} {label}, "
+                  f"somando {_reais(total, cents=False)}.")
+    _pending_cards[0] = [{"title": f"VENDAS{desc.upper()} · {label.upper()}"[:60], "value": n, "fmt": "int",
+                          "unit": "venda(s)", "accent": "ok" if n else None,
+                          "lines": [f"soma: {_fmt(total)}"]
+                                   + [f"{m}: {c}" for m, c in sorted(by_method.items(), key=lambda kv: -kv[1])[:4]],
+                          "hold": 30}]
+    panel = [f"RASTRACKING — vendas{desc} {label}", f"Quantidade: {n}", f"Soma: {_fmt(total)}", ""]
+    for m, c in sorted(by_method.items(), key=lambda kv: -kv[1]):
+        panel.append(f"  • {m}: {c}")
+    return spoken, "\n".join(panel)
+
+
+def sales_summary(period, start="", end="", values=None):
+    """Ticket médio, faixas de valor, meios de pagamento e horas. Uses
+    GET /sales/summary when the server has it, else computes from /sales."""
+    a, b, label = _period(period, start, end)
+    totals, ranges, methods, hours = {}, [], [], []
+    try:
+        d = _get("sales/summary", values, startDate=a.isoformat(), endDate=b.isoformat())
+        totals = d.get("totals") or {}
+        ranges = d.get("byAmountRange") or []
+        methods = d.get("byPaymentMethod") or []
+        hours = d.get("byHour") or []
+    except RuntimeError as e:
+        if "404" not in str(e) and "not found" not in str(e).lower():
+            raise
+    except requests.HTTPError as e:
+        if not (e.response is not None and e.response.status_code == 404):
+            raise
+    if not totals:
+        n, tot, att_n, att_amt = 0, 0.0, 0, 0.0
+        edges = [100.0, 300.0, 1000.0]
+        buckets = [0] * (len(edges) + 1)
+        bamt = [0.0] * (len(edges) + 1)
+        meth: dict = {}
+        hrs: dict = {}
+        for x in _iter_sales(dict(startDate=a.isoformat(), endDate=b.isoformat(), limit=100), values):
+            amt = _sale_amount(x)
+            n += 1; tot += amt
+            if _sale_attributed(x):
+                att_n += 1; att_amt += amt
+            i = sum(1 for e in edges if amt >= e)
+            buckets[i] += 1; bamt[i] += amt
+            m = _sale_method(x)
+            meth.setdefault(m, [0, 0.0]); meth[m][0] += 1; meth[m][1] += amt
+            w = _sale_when(x)
+            if w:
+                hrs.setdefault(w.hour, [0, 0.0]); hrs[w.hour][0] += 1; hrs[w.hour][1] += amt
+        totals = {"count": n, "amount": tot, "attributedCount": att_n, "attributedAmount": att_amt,
+                  "averageTicket": (tot / n) if n else 0.0}
+        lo = [None] + edges
+        hi = edges + [None]
+        ranges = [{"min": lo[i], "max": hi[i], "count": buckets[i], "amount": bamt[i]} for i in range(len(buckets))]
+        methods = [{"method": m, "count": v[0], "amount": v[1]} for m, v in meth.items()]
+        hours = [{"hour": h, "count": v[0], "amount": v[1]} for h, v in hrs.items()]
+    n = int(_num(totals.get("count")))
+    tot = _num(totals.get("amount"))
+    avg = _num(totals.get("averageTicket")) or ((tot / n) if n else 0.0)
+    methods = sorted(methods, key=lambda r: -_num(r.get("count")))
+    hours = sorted(hours, key=lambda r: -_num(r.get("count")))
+
+    def _rng(r):
+        lo, hi = r.get("min"), r.get("max")
+        if lo in (None, "") and hi not in (None, ""):
+            return f"até {_fmt(hi)}"
+        if hi in (None, "") and lo not in (None, ""):
+            return f"de {_fmt(lo)} para cima"
+        return f"{_fmt(lo)} a {_fmt(hi)}"
+
+    if n == 0:
+        spoken = f"Nenhuma venda trackeada {label}."
+    else:
+        spoken = (f"{label.capitalize()}: {n} vendas, ticket médio {_reais(avg, cents=False)}.")
+        if ranges:
+            top = sorted(ranges, key=lambda r: -_num(r.get("count")))[0]
+            spoken += f" A faixa mais comum é {_rng(top)}, com {int(_num(top.get('count')))} vendas."
+        if methods:
+            m0 = methods[0]
+            spoken += f" Meio mais usado: {m0.get('method')}, {int(_num(m0.get('count')))} vendas."
+        if hours:
+            h0 = hours[0]
+            spoken += f" Hora mais forte: {int(_num(h0.get('hour')))}h."
+    _pending_cards[0] = [
+        {"title": f"TICKET MÉDIO · {label}".upper(), "value": avg, "fmt": "money",
+         "lines": [f"{n} vendas, {_fmt(tot)}"] + [f"{_rng(r)}: {int(_num(r.get('count')))}" for r in ranges[:4]],
+         "hold": 30},
+        {"title": "POR MEIO DE PAGAMENTO",
+         "lines": [f"{r.get('method')}: {int(_num(r.get('count')))} ({_fmt(_num(r.get('amount')))})" for r in methods[:6]] or ["—"],
+         "keys": ["meio", "pagamento", "pix", "cartão", "boleto"], "hold": 30},
+        {"title": "POR HORA",
+         "lines": [f"{int(_num(r.get('hour'))):02d}h: {int(_num(r.get('count')))} vendas" for r in sorted(hours, key=lambda r: _num(r.get('hour')))[:12]] or ["—"],
+         "keys": ["hora", "horário"], "hold": 30},
+    ]
+    panel = [f"RASTRACKING — resumo de vendas {label}", f"Vendas: {n}   Total: {_fmt(tot)}   Ticket médio: {_fmt(avg)}",
+             f"Atribuídas: {int(_num(totals.get('attributedCount')))} ({_fmt(_num(totals.get('attributedAmount')))})", "",
+             "Por faixa:"] + [f"  • {_rng(r)}: {int(_num(r.get('count')))}  ({_fmt(_num(r.get('amount')))})" for r in ranges] \
+            + ["", "Por meio:"] + [f"  • {r.get('method')}: {int(_num(r.get('count')))}  ({_fmt(_num(r.get('amount')))})" for r in methods] \
+            + ["", "Por hora:"] + [f"  • {int(_num(r.get('hour'))):02d}h: {int(_num(r.get('count')))}" for r in sorted(hours, key=lambda r: _num(r.get('hour')))]
+    return spoken, "\n".join(panel)
+
+
+def last_sales(period, start="", end="", limit=5, attributed=None, payment_method="", client="", values=None):
+    params, label = _sales_filters(period, start, end, None, None, attributed, payment_method, client)
+    params["sort"] = "saleDate_desc"
+    rows = []
+    name_filter = client.strip().lower() if client and "clientId" not in params else ""
+    for x in _iter_sales(params, values):
+        if name_filter and name_filter not in _sale_client(x).lower():
+            continue
+        rows.append(x)
+        if len(rows) >= max(1, int(limit)):
+            break
+    if not rows:
+        _pending_cards[0] = [{"title": f"ÚLTIMAS VENDAS · {label}".upper(), "lines": ["nenhuma"], "hold": 20}]
+        return f"Nenhuma venda trackeada {label}.", f"RASTRACKING — últimas vendas {label}\n  (nenhuma)"
+    lines = []
+    for x in rows:
+        w = _sale_when(x)
+        lines.append(f"{w:%d/%m %H:%M}  {_fmt(_sale_amount(x))}  {_sale_client(x)}  {_sale_method(x)}"
+                     + ("  [anúncio]" if _sale_attributed(x) else "") if w else
+                     f"{_fmt(_sale_amount(x))}  {_sale_client(x)}  {_sale_method(x)}")
+    spoken = f"Últimas {len(rows)} vendas {label}: " + "; ".join(
+        f"{_sale_client(x)}, {_reais(_sale_amount(x), cents=False)}" + (f", às {_sale_when(x):%H:%M}" if _sale_when(x) else "")
+        for x in rows[:5]) + "."
+    _pending_cards[0] = [{"title": f"ÚLTIMAS VENDAS · {label}".upper(), "lines": lines[:7], "hold": 30}]
+    return spoken, "RASTRACKING — últimas vendas\n" + "\n".join("  • " + ln for ln in lines)
+
+
 # ── ⚙ settings ───────────────────────────────────────────────────────────────
 
 def _test(values: dict):
     if not _key(values):
         return False, "Paste the Rastracking API key first (ADM → Configurações → API Rastracking)."
     notes, ok = [], True
-    for path, label in (("clients", "clients:read"), ("support/conversations", "support:read")):
+    report = []
+    for path, label, must in (("clients", "clients:read", True), ("support/conversations", "support:read", True),
+                              ("sales", "sales (vendas individuais)", False),
+                              ("sales/summary", "sales/summary", False)):
         try:
             d = _get(path, values, limit=1)
-            n = len(d.get("data") or [])
+            data = d.get("data")
+            n = len(data) if isinstance(data, list) else (1 if d else 0)
             notes.append(f"{label} OK" + (f" ({'has data' if n else 'empty'})"))
+            sample = data[0] if isinstance(data, list) and data else d
+            if isinstance(sample, dict):
+                report.append(f"{path}: fields = {', '.join(sorted(sample.keys()))}")
         except RuntimeError as e:
-            ok = False
+            ok = ok and not must
             notes.append(f"{label} FAILED — {e}")
+            report.append(f"{path}: {e}")
         except Exception as e:
-            ok = False
+            ok = ok and not must
             notes.append(f"{label} FAILED — {e}")
+            report.append(f"{path}: {e}")
+    try:
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "memory", "rastracking_teste.txt")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(report))
+        notes.append("field names saved to memory\\rastracking_teste.txt")
+    except Exception:
+        pass
     return ok, "; ".join(notes)
 
 
@@ -399,6 +679,27 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     end = str(parameters.get("end") or "")
     ws = parameters.get("with_subject")
     with_subject = ws if isinstance(ws, bool) else str(ws).lower() in ("true", "1", "yes", "sim")
+
+    def _opt_num(key):
+        v = parameters.get(key)
+        if v in (None, ""):
+            return None
+        try:
+            return float(str(v).replace(",", "."))
+        except Exception:
+            return None
+
+    min_amount, max_amount = _opt_num("min_amount"), _opt_num("max_amount")
+    att = parameters.get("attributed")
+    attributed = att if isinstance(att, bool) else (
+        True if str(att).lower() in ("true", "1", "yes", "sim") else
+        False if str(att).lower() in ("false", "0", "no", "não", "nao") else None)
+    payment_method = str(parameters.get("payment_method") or "").strip()
+    client = str(parameters.get("client") or "").strip()
+    try:
+        limit = int(parameters.get("limit") or 5)
+    except Exception:
+        limit = 5
     try:
         if action in ("tracked_revenue", "revenue", "faturamento"):
             spoken, panel = tracked_revenue(period, start, end)
@@ -406,6 +707,16 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
         elif action in ("top_clients", "maiores_clientes", "clients_ranking"):
             spoken, panel = tracked_revenue(period, start, end, top_clients=True)
             title = "RASTRACKING — maiores clientes"
+        elif action in ("sales_count", "count_sales", "vendas"):
+            spoken, panel = sales_count(period, start, end, min_amount, max_amount, attributed,
+                                        payment_method, client)
+            title = "RASTRACKING — vendas"
+        elif action in ("sales_summary", "summary", "ticket", "resumo"):
+            spoken, panel = sales_summary(period, start, end)
+            title = "RASTRACKING — resumo de vendas"
+        elif action in ("last_sales", "recent_sales", "ultimas_vendas"):
+            spoken, panel = last_sales(period, start, end, limit, attributed, payment_method, client)
+            title = "RASTRACKING — últimas vendas"
         elif action in ("expiring_clients", "expiring", "vencimentos"):
             spoken, panel = expiring_clients(period, start, end)
             title = "RASTRACKING — vencimentos"
@@ -413,12 +724,23 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
             spoken, panel = support_pending(with_subject)
             title = "RASTRACKING — suporte"
         else:
-            return "Unknown action. Use tracked_revenue, expiring_clients or support_pending."
+            return ("Unknown action. Use tracked_revenue, top_clients, sales_count, sales_summary, "
+                    "last_sales, expiring_clients or support_pending.")
     except _NotConfigured:
         return ("Rastracking is not configured: paste the API key in ⚙ → PLUGIN SETTINGS → "
                 "RASTRACKING and press TEST CONNECTION.")
     except RuntimeError as e:
-        return str(e)
+        msg = str(e)
+        if "404" in msg and "sales" in action:
+            msg += (" — the Rastracking API has no /sales endpoint yet (or the key lacks its "
+                    "permission). Tell the user plainly; do not guess the figure.")
+        return msg
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "?"
+        if code == 404 and "sales" in action:
+            return ("Rastracking answered 404 for /sales: the individual-sales endpoint is not "
+                    "available on this account yet. Tell the user; do not guess.")
+        return f"Rastracking answered {code}."
     except requests.RequestException as e:
         return f"Rastracking could not be reached: {e}"
     except Exception as e:

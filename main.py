@@ -358,15 +358,64 @@ def _sane_history(history: list) -> list:
     return out
 
 
+_MSG_MAX_CHARS = 6000          # one message (what a voice reply could ever need)
+_HISTORY_MAX_CHARS = 48000     # the whole remembered conversation (~12k tokens)
+
+
+def _msg_len(m: dict) -> int:
+    n = len(str(m.get("content") or ""))
+    for c in m.get("tool_calls") or []:
+        try:
+            n += len(str(c.get("function", {}).get("arguments") or ""))
+        except Exception:
+            pass
+    return n
+
+
 def _trim_history(history: list, keep: int = 24) -> None:
     """Keep roughly the last `keep` messages, cutting only at a user turn so a
-    tool exchange is never split, then drop any orphans in place."""
+    tool exchange is never split; cap every message and the total size, so a
+    runaway reply or a flood of alerts can never push the request past the
+    model's window; then drop any orphans in place."""
+    for m in history:
+        c = m.get("content")
+        if isinstance(c, str) and len(c) > _MSG_MAX_CHARS:
+            m["content"] = c[:_MSG_MAX_CHARS] + " …[truncated]"
     if len(history) > keep:
         cut = len(history) - keep
         while cut < len(history) and history[cut].get("role") != "user":
             cut += 1
         del history[:cut]
+    total = sum(_msg_len(m) for m in history)
+    while total > _HISTORY_MAX_CHARS and len(history) > 1:
+        # drop the oldest exchange: up to (not including) the next user turn
+        cut = 1
+        while cut < len(history) and history[cut].get("role") != "user":
+            cut += 1
+        if cut >= len(history):
+            break
+        total -= sum(_msg_len(m) for m in history[:cut])
+        del history[:cut]
     history[:] = _sane_history(history)
+
+
+def _dump_brain_debug(system_text: str, history: list, tools: list | None, err: str) -> None:
+    """When the provider says the request is too big, write WHAT was big to
+    memory/brain_debug.txt — role and size of every message — so the cause
+    can be read instead of guessed."""
+    try:
+        path = BASE_DIR / "memory" / "brain_debug.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"{datetime.now():%Y-%m-%d %H:%M:%S}  {err[:200]}",
+                 f"system prompt: {len(system_text)} chars",
+                 f"tools: {len(json.dumps(tools or []))} chars, {len(tools or [])} tools",
+                 f"history: {len(history)} messages, {sum(_msg_len(m) for m in history)} chars"]
+        for i, m in enumerate(history):
+            head = str(m.get("content") or "")[:80].replace("\n", " ")
+            lines.append(f"  [{i}] {m.get('role')}: {_msg_len(m)} chars  {head!r}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _briefing_cards(agenda: str, tracking: dict, yt: dict, news_text: str) -> list:
@@ -786,6 +835,13 @@ class JarvisLive:
         self._brain_busy = False
         self.ui.on_music_ended    = self._on_music_ended
         self.ui.on_music_error    = self._on_music_error
+        # Appointments ⇄ Trello mirror: a daemon thread that reconciles the
+        # chosen list every minute while the switch in 🗓 AGENDAMENTOS is on.
+        try:
+            from core import agenda_sync as _agenda_sync
+            _agenda_sync.start(log=self.ui.write_log)
+        except Exception as _e:
+            print(f"[Agenda] sync not started: {_e}")
         self._music_url = ""
         self._music_local = False
         self.ui.on_focus_mode     = self._focus_mode_hook
@@ -1165,6 +1221,22 @@ class JarvisLive:
                             history.append({"role": "tool", "tool_call_id": c["id"],
                                             "content": str(result)[:4000]})
                         msgs = [{"role": "system", "content": self._system_prompt_text}] + _sane_history(history)
+                except _brain.ContextTooLong as e:
+                    # The request outgrew the model. Record what was big, drop
+                    # everything but the sentence just spoken, and answer it.
+                    _dump_brain_debug(self._system_prompt_text, history, tools, str(e))
+                    self.ui.write_log("ERR: Economy brain — the conversation got too long for "
+                                      "the model; memory reset (details in memory/brain_debug.txt).")
+                    history[:] = [{"role": "user", "content": text[:_MSG_MAX_CHARS]}]
+                    try:
+                        content, _calls = await asyncio.to_thread(
+                            _brain.chat_stream,
+                            [{"role": "system", "content": self._system_prompt_text}] + history,
+                            None, st, _say, lambda: self._interrupted)
+                        if content:
+                            history.append({"role": "assistant", "content": content})
+                    except Exception as e2:
+                        self.ui.write_log(f"ERR: Economy brain — {str(e2)[:160]}")
                 except Exception as e:
                     msg = str(e)[:160]
                     self.ui.write_log(f"ERR: Economy brain — {msg}")
@@ -1204,7 +1276,7 @@ class JarvisLive:
                 tg.create_task(self._run_sleep_watch())
                 tg.create_task(self._run_system_monitor())
                 tg.create_task(self._run_proactive_mode())
-                if not self._briefing_sent and get_brief_enabled() and self._awake:
+                if self._briefing_allowed():
                     self._briefing_sent = True
                     tg.create_task(self._send_startup_briefing())
         finally:
@@ -1222,6 +1294,7 @@ class JarvisLive:
         streaming URL the player might refuse); playlist tracks stream, and
         fall back to a download when the player refuses the stream."""
         loop = asyncio.get_event_loop()
+        retry = bool(local)                      # a second attempt for this track
         if local is None:
             local = (mode == "morning") or bool(_music.cached_file(url))
         stream = title = ""
@@ -1229,7 +1302,20 @@ class JarvisLive:
             try:
                 stream, title = await loop.run_in_executor(None, _music.download_audio, url)
             except Exception as e:
-                self.ui.write_log(f"SYS: Music download failed ({str(e)[:60]}) — trying the stream.")
+                msg = str(e).replace("\n", " ")
+                if "sign in" in msg.lower() or "not a bot" in msg.lower():
+                    hint = (" YouTube is asking for a sign-in: set \"music_cookies_browser\": "
+                            "\"edge\" (or chrome/firefox) in config/api_keys.json, or update "
+                            "yt-dlp.")
+                else:
+                    hint = ""
+                self.ui.write_log(f"SYS: Music download failed ({msg[:90]}).{hint}")
+                if retry:
+                    # The stream already failed once for this track and the
+                    # download just failed too: stop here, no ping-pong.
+                    self._music_mode = ""
+                    return False
+                self.ui.write_log("SYS: Trying the stream instead…")
         if not stream:
             try:
                 stream, title = await loop.run_in_executor(None, _music.resolve_audio, url)
@@ -1269,6 +1355,12 @@ class JarvisLive:
         url = getattr(self, "_music_url", "")
         if not loop or not url or getattr(self, "_music_local", False):
             return False
+        tried = getattr(self, "_music_retried", None)
+        if tried is None:
+            tried = self._music_retried = set()
+        if url in tried:
+            return False                         # one download retry per track, ever
+        tried.add(url)
         mode = self._music_mode or "morning"
         self.ui.write_log("SYS: Stream refused — downloading the track instead…")
         loop.call_soon_threadsafe(
@@ -2753,7 +2845,33 @@ class JarvisLive:
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
+    def _briefing_allowed(self) -> bool:
+        """The start-up briefing fires once per launch, only with MORNING BRIEF
+        on and the assistant awake. When it is skipped, the log says why — a
+        silent skip looks exactly like a bug."""
+        if self._briefing_sent:
+            return False
+        if not get_brief_enabled():
+            self.ui.write_log("SYS: Morning briefing skipped — MORNING BRIEF is OFF (🎛 to turn it on).")
+            self._briefing_sent = True          # say it once per launch
+            return False
+        if not self._awake:
+            self.ui.write_log("SYS: Morning briefing skipped — waiting for the wake word.")
+            return False
+        return True
+
     async def _send_startup_briefing(self, force: bool = False, greet: bool = True) -> None:
+        """Wrapper: a briefing that fails must say so in the log, never vanish."""
+        try:
+            await self._send_startup_briefing_inner(force=force, greet=greet)
+        except Exception as e:
+            try:
+                self.ui.write_log(f"ERR: Briefing failed — {str(e)[:140]}")
+            except Exception:
+                pass
+            print(f"[Briefing] {e!r}")
+
+    async def _send_startup_briefing_inner(self, force: bool = False, greet: bool = True) -> None:
         """
         Two-phase briefing optimized for speed:
           Phase 1 — instant greeting (no tools) → speech starts in <1s
@@ -2805,7 +2923,7 @@ class JarvisLive:
                     turn_complete=True,
                 )
             return
-        _mark_briefing_done(today)
+        self.ui.write_log("SYS: Morning briefing starting…")
 
         # ── Morning music ────────────────────────────────────────────────
         # The first launch of the day opens with the user's track, and the
@@ -2813,7 +2931,14 @@ class JarvisLive:
         # voice lands on the opening instead of over a silent intro. The stream
         # is resolved off-thread; if anything fails the briefing simply goes
         # on without music.
-        await self._start_morning_music()
+        # Bounded: a stalled download or a YouTube hiccup must never hold the
+        # greeting hostage (it did once — silently).
+        try:
+            await asyncio.wait_for(self._start_morning_music(), timeout=30.0)
+        except asyncio.TimeoutError:
+            self.ui.write_log("SYS: Morning music is taking too long — going on without it.")
+        except Exception as e:
+            self.ui.write_log(f"SYS: Morning music skipped — {str(e)[:80]}")
 
         # Start the lookups immediately — they run while phase 1 plays. Two
         # sources, both chosen by the user (core/briefing_sources.py): the
@@ -2874,8 +2999,10 @@ class JarvisLive:
                 turn_complete=True,
             )
             print("[JARVIS] Briefing phase 1 (greeting) sent.")
+            _mark_briefing_done(today)             # only now does the day count as briefed
         else:
             print("[JARVIS] Briefing phase 1 skipped (the model already greeted).")
+            _mark_briefing_done(today)
 
         # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
         async def _deliver_news():
@@ -3353,7 +3480,7 @@ class JarvisLive:
                     # Morning briefing — fires once per process launch (if enabled).
                     # Skipped in wake-word mode: it comes up asleep, and a briefing
                     # would mean talking while "asleep".
-                    if not self._briefing_sent and get_brief_enabled() and self._awake:
+                    if self._briefing_allowed():
                         self._briefing_sent = True
                         tg.create_task(self._send_startup_briefing())
 

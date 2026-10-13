@@ -30,6 +30,7 @@ import requests
 
 NAMESPACE = "brain"
 TIMEOUT = 60
+MAX_REPLY_CHARS = 12000        # a spoken reply never needs more; guards runaway streams
 
 PRESETS = {
     "deepseek":   {"base_url": "https://api.deepseek.com/v1",
@@ -146,6 +147,11 @@ def to_openai_tools(decls: list) -> list[dict]:
 _SENT_END = re.compile(r"(?<=[.!?…])\s+|\n+")
 
 
+class ContextTooLong(RuntimeError):
+    """The provider refused the request because the conversation sent is
+    bigger than the model's window. The caller drops the history and retries."""
+
+
 def chat_stream(messages: list, tools: list | None, st: dict,
                 on_sentence: Callable[[str], None],
                 should_stop: Callable[[], bool] = lambda: False) -> tuple[str, list[dict]]:
@@ -169,7 +175,12 @@ def chat_stream(messages: list, tools: list | None, st: dict,
     with requests.post(f"{st['base_url']}/chat/completions", json=payload,
                        headers=headers, timeout=TIMEOUT, stream=True) as r:
         if r.status_code >= 400:
-            raise requests.HTTPError(f"{r.status_code}: {r.text[:300]}", response=r)
+            body = r.text[:300]
+            low = body.lower()
+            if r.status_code == 400 and ("context length" in low or "maximum context" in low
+                                         or "too many tokens" in low or "token limit" in low):
+                raise ContextTooLong(f"{r.status_code}: {body}")
+            raise requests.HTTPError(f"{r.status_code}: {body}", response=r)
         for raw in r.iter_lines():
             if should_stop():
                 break
@@ -191,6 +202,15 @@ def chat_stream(messages: list, tools: list | None, st: dict,
             delta = choices[0].get("delta") or {}
             piece = delta.get("content") or ""
             if piece:
+                # Some OpenAI-compatible gateways stream the WHOLE text so far
+                # in every chunk instead of the new bit. Appending that would
+                # square the reply; keep only what is new.
+                if content and len(piece) > len(content) and piece.startswith(content):
+                    piece = piece[len(content):]
+                if len(content) + len(piece) > MAX_REPLY_CHARS:
+                    piece = piece[: max(0, MAX_REPLY_CHARS - len(content))]
+                    if not piece:
+                        break
                 content += piece
                 buf += piece
                 # hand over finished sentences, keep the open tail

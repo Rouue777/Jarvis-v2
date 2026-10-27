@@ -1,6 +1,49 @@
 
+import time
+
 from core.spotify_client import get_spotify_client
 from spotipy.exceptions import SpotifyException
+
+
+def find_spotify_device(spotify):
+    """Localiza um dispositivo disponível, priorizando o PC."""
+
+    for attempt in range(3):
+        devices = spotify.devices().get("devices", [])
+
+        available = [
+            device for device in devices
+            if device.get("id") and not device.get("is_restricted", False)
+        ]
+
+        if available:
+            # Prioriza o Spotify no computador.
+            computer = next(
+                (
+                    device for device in available
+                    if device.get("type") == "Computer"
+                ),
+                None,
+            )
+
+            if computer:
+                return computer
+
+            # Se não houver computador, usa o dispositivo ativo.
+            active = next(
+                (
+                    device for device in available
+                    if device.get("is_active")
+                ),
+                None,
+            )
+
+            return active or available[0]
+
+        if attempt < 2:
+            time.sleep(1)
+
+    return None
 
 
 def spotify_play_pause(
@@ -14,12 +57,15 @@ def spotify_play_pause(
 
     aliases = {
         "tocar": "play",
-        "play" : "play",
+        "play": "play",
         "reproduzir": "play",
         "pausar": "pause",
+        "pause": "pause",
         "continuar": "resume",
         "retomar": "resume",
+        "resume": "resume",
     }
+
     command = aliases.get(command, command)
 
     if command not in {"play", "pause", "resume"}:
@@ -30,25 +76,44 @@ def spotify_play_pause(
 
     try:
         spotify = get_spotify_client()
+        device = find_spotify_device(spotify)
+
+        if not device:
+            return (
+                "Não encontrei dispositivos Spotify disponíveis. "
+                "Abra o Spotify no computador, aguarde alguns segundos "
+                "e tente novamente."
+            )
+
+        device_id = device["id"]
+        device_name = device.get("name", "dispositivo desconhecido")
 
         if command == "pause":
-            spotify.pause_playback()
-            return "Reprodução do Spotify pausada."
+            spotify.pause_playback(device_id=device_id)
+            return f"Solicitação para pausar enviada ao Spotify em {device_name}."
 
-        spotify.start_playback()
+        # Informa explicitamente qual dispositivo deve reproduzir.
+        spotify.start_playback(device_id=device_id)
 
-        if command == "resume":
-            return "Solicitação enviada para retomar a reprodução."
-
-        return "Solicitação enviada para iniciar a reprodução."
+        return (
+            f"Solicitação para iniciar ou retomar a reprodução "
+            f"enviada ao Spotify em {device_name}."
+        )
 
     except SpotifyException as e:
         status = getattr(e, "http_status", None)
 
         if status == 404:
             return (
-                "Não foi possível controlar a reprodução. "
-                "Verifique se existe um dispositivo Spotify ativo."
+                "O Spotify não conseguiu iniciar a reprodução nesse "
+                "dispositivo. Verifique se o aplicativo terminou de "
+                "abrir e tente novamente."
+            )
+
+        if status == 403:
+            return (
+                "O Spotify recusou o comando. Verifique as permissões "
+                "da conta e a disponibilidade do recurso."
             )
 
         return f"Erro da API do Spotify (HTTP {status}): {e}"
@@ -60,19 +125,14 @@ def spotify_play_pause(
 TOOL = {
     "name": "spotify_play_pause",
     "description": (
-        "Controla a reprodução atual do Spotify usando a conta autenticada "
-        "no Jarvis. Use quando o usuário pedir para pausar a música, "
-        "parar temporariamente a reprodução, voltar a tocar, continuar "
-        "a música ou retomar a reprodução pausada. "
-        "Escolha command='pause' para pausar; command='resume' para "
-        "retomar; command='play' para iniciar ou retomar a reprodução "
-        "atual. Os comandos play e resume utilizam a API de início/"
-        "retomada de reprodução. "
-        "Esta ferramenta não pesquisa músicas nem seleciona faixas, "
-        "álbuns ou playlists específicos. Não a use para pedidos como "
-        "'toque [nome da música]'. "
-        "Informe o resultado com base na resposta da API e nunca afirme "
-        "que a música começou se a operação retornar um erro."
+        "Controla a reprodução atual do Spotify. Localiza dispositivos "
+        "disponíveis e prioriza o Spotify do computador, mesmo quando "
+        "ele não é o dispositivo ativo. Usa o identificador explícito "
+        "do dispositivo ao iniciar, retomar ou pausar a reprodução. "
+        "Use command='play' para iniciar, command='pause' para pausar "
+        "e command='resume' para retomar. Não pesquisa nem seleciona "
+        "músicas específicas. Informe erros sem afirmar que a reprodução "
+        "começou quando isso não foi confirmado."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -81,8 +141,8 @@ TOOL = {
                 "type": "STRING",
                 "enum": ["play", "pause", "resume"],
                 "description": (
-                    "Ação desejada: play para iniciar a reprodução atual, "
-                    "pause para pausar, resume para retomar."
+                    "Ação desejada: play para iniciar, "
+                    "pause para pausar ou resume para retomar."
                 ),
             }
         },

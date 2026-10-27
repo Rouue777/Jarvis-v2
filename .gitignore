@@ -55,3 +55,5 @@ memory/usage.json
 memory/briefing_state.json
 memory/music_cache/
 *.lnk
+
+config/api_keys.json

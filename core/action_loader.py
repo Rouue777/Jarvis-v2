@@ -168,12 +168,20 @@ def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,
     valid: dict[str, ActionRecord] = {}
     all_records: list[ActionRecord] = []
 
-    files = sorted(actions_dir.glob("*.py"), key=lambda p: p.name)  # deterministic order
+    files = sorted(
+    (
+        path
+        for path in actions_dir.rglob("*.py")
+        if not any(part.startswith("_") for part in path.relative_to(actions_dir).parts)
+    ),
+    key=lambda p: str(p.relative_to(actions_dir)).lower(),
+)  # deterministic order
     for path in files:
         if path.name.startswith("_"):
             continue
         try:
-            module_name = f"actions.{path.stem}"
+            relative_path = path.relative_to(actions_dir).with_suffix("")
+            module_name = "actions." + ".".join(relative_path.parts)
             # Reuse the already-imported module when present so handlers are the
             # same objects the rest of the app holds.
             module = sys.modules.get(module_name)
